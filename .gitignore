@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build output
+backend/functions/lib/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+test-backend.sh
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+google-services.json
+GoogleService-Info.plist
+.firebaserc
+backend/functions/.secret.local
+
+# Mobile env config (contains real Firebase keys)
+mobile/src/config/env.ts
+
+# Expo / React Native
+mobile/.expo/
+mobile/dist/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,33 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Signals: only backend (admin SDK) writes. Users can read their signals.
+    match /signals/{signalId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only admin SDK (Cloud Functions) can write
+    }
+
+    // Decisions: only backend writes. Users can read their own.
+    match /decisions/{decisionId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow write: if false;
+    }
+
+    // Orders: only backend writes. Users can read.
+    match /orders/{orderId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Audit log: no client access
+    match /audit/{entry} {
+      allow read, write: if false;
+    }
+
+    // User tokens (for FCM): user can manage their own
+    match /userTokens/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
