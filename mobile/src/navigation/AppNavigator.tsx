@@ -5,8 +5,10 @@ import { Text } from "react-native";
 
 import { useAuth } from "../context/AuthContext";
 import LoginScreen from "../screens/LoginScreen";
+import DashboardScreen from "../screens/DashboardScreen";
 import SignalInboxScreen from "../screens/SignalInboxScreen";
 import SignalDetailScreen from "../screens/SignalDetailScreen";
+import PositionsScreen from "../screens/PositionsScreen";
 import OrdersScreen from "../screens/OrdersScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 
@@ -47,11 +49,31 @@ function MainTabs() {
       }}
     >
       <Tab.Screen
+        name="DashboardTab"
+        component={DashboardScreen}
+        options={{
+          title: "Dashboard",
+          ...screenOptions,
+          headerShown: true,
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>📈</Text>,
+        }}
+      />
+      <Tab.Screen
         name="SignalsTab"
         component={SignalsStack}
         options={{
           title: "Signals",
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>📊</Text>,
+        }}
+      />
+      <Tab.Screen
+        name="PositionsTab"
+        component={PositionsScreen}
+        options={{
+          title: "Positions",
+          ...screenOptions,
+          headerShown: true,
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>💰</Text>,
         }}
       />
       <Tab.Screen
@@ -82,7 +104,7 @@ export default function AppNavigator() {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return null; // Splash screen would show here
+    return null;
   }
 
   return (

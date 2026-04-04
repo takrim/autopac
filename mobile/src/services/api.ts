@@ -51,7 +51,7 @@ export interface Signal {
 }
 
 export async function fetchSignals(status?: string): Promise<Signal[]> {
-  const query = status ? `?status=${status}` : "";
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
   const data = await apiRequest<{ signals: Signal[] }>(`/signals${query}`);
   return data.signals;
 }
@@ -101,6 +101,73 @@ export interface Order {
 export async function fetchOrders(): Promise<Order[]> {
   const data = await apiRequest<{ orders: Order[] }>("/orders");
   return data.orders;
+}
+
+// --- Account ---
+
+export interface AlpacaAccount {
+  equity: string;
+  cash: string;
+  buying_power: string;
+  portfolio_value: string;
+  last_equity: string;
+  long_market_value: string;
+  short_market_value: string;
+  initial_margin: string;
+  maintenance_margin: string;
+  daytrade_count: number;
+  status: string;
+  currency: string;
+  non_marginable_buying_power: string;
+}
+
+export async function fetchAccount(): Promise<AlpacaAccount> {
+  const data = await apiRequest<{ account: AlpacaAccount }>("/account");
+  return data.account;
+}
+
+// --- Positions ---
+
+export interface Position {
+  symbol: string;
+  qty: string;
+  avg_entry_price: string;
+  current_price: string;
+  market_value: string;
+  cost_basis: string;
+  unrealized_pl: string;
+  unrealized_plpc: string;
+  unrealized_intraday_pl: string;
+  unrealized_intraday_plpc: string;
+  change_today: string;
+  side: string;
+  asset_class: string;
+}
+
+export async function fetchPositions(): Promise<Position[]> {
+  const data = await apiRequest<{ positions: Position[] }>("/positions");
+  return data.positions;
+}
+
+// --- Portfolio History ---
+
+export interface PortfolioHistory {
+  timestamp: number[];
+  equity: number[];
+  profit_loss: number[];
+  profit_loss_pct: number[];
+  base_value: number;
+  timeframe: string;
+}
+
+export async function fetchPortfolioHistory(
+  period = "1W",
+  timeframe = "1D"
+): Promise<PortfolioHistory> {
+  const data = await apiRequest<{ history: PortfolioHistory }>(
+    `/portfolio-history?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(timeframe)}`
+  );
+  return data.history;
 }
 
 // --- FCM Token ---

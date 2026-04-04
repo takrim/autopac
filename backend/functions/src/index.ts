@@ -19,6 +19,11 @@ import {
   handleListWebhookErrors,
   handleListBrokerErrors,
 } from "./api/signals";
+import {
+  handleGetAccount,
+  handleGetPositions,
+  handleGetPortfolioHistory,
+} from "./api/alpaca";
 
 // --- Webhook App (no auth — uses shared secret) ---
 const webhookApp = express();
@@ -42,6 +47,9 @@ apiApp.get("/orders", handleListOrders);
 apiApp.get("/webhook-errors", handleListWebhookErrors);
 apiApp.get("/broker-errors", handleListBrokerErrors);
 apiApp.post("/fcm-token", handleRegisterToken);
+apiApp.get("/account", handleGetAccount);
+apiApp.get("/positions", handleGetPositions);
+apiApp.get("/portfolio-history", handleGetPortfolioHistory);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.

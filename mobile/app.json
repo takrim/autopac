@@ -22,7 +22,14 @@
       "googleServicesFile": "./google-services.json"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#e94560"
+        }
+      ]
     ],
     "extra": {
       "eas": {
