@@ -165,7 +165,7 @@ describe("Webhook Payload Validation", () => {
     }
   });
 
-  test("calculates stopLoss from price (input stopLoss is ignored)", () => {
+  test("auto-calculates stopLoss from price even when input is invalid", () => {
     const result = validatePayload(validPayload({ stopLoss: -5 }));
     expect(result.valid).toBe(true);
     if (result.valid) {
@@ -174,7 +174,7 @@ describe("Webhook Payload Validation", () => {
     }
   });
 
-  test("calculates takeProfit from price (input takeProfit is ignored)", () => {
+  test("auto-calculates takeProfit from price even when input is invalid", () => {
     const result = validatePayload(validPayload({ takeProfit: "abc" }));
     expect(result.valid).toBe(true);
     if (result.valid) {
