@@ -28,11 +28,17 @@ jest.mock("../src/config", () => ({
     WEBHOOK_SECRET_HEADER: "x-webhook-secret",
     RATE_LIMIT_WINDOW_MS: 60000,
     RATE_LIMIT_MAX_REQUESTS: 30,
-    DEFAULT_TRADE_QUANTITY: 1,
+    TRADE_VALUE_USD: 1000,
     DEFAULT_ORDER_TYPE: "market",
     MAX_DAILY_TRADES: 20,
     MAX_POSITION_VALUE: 50000,
+    STOP_LOSS_PCT: 0.5,
+    TAKE_PROFIT_PCT: 2.0,
+    ALLOWED_DIRECTIONS: "BOTH",
+    ALLOWED_ORDER_COMMENTS: [],
     ACTIVE_BROKER: "mock",
+    ORDER_PYRAMID: false,
+    AUTO_APPROVE: false,
     PAPER_TRADING: true,
   },
 }));
@@ -159,14 +165,22 @@ describe("Webhook Payload Validation", () => {
     }
   });
 
-  test("rejects invalid stopLoss", () => {
+  test("auto-calculates stopLoss from price even when input is invalid", () => {
     const result = validatePayload(validPayload({ stopLoss: -5 }));
-    expect(result.valid).toBe(false);
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      // SL is auto-calculated as price * (1 - STOP_LOSS_PCT/100)
+      expect(result.payload.stopLoss).toBeGreaterThan(0);
+    }
   });
 
-  test("rejects invalid takeProfit", () => {
+  test("auto-calculates takeProfit from price even when input is invalid", () => {
     const result = validatePayload(validPayload({ takeProfit: "abc" }));
-    expect(result.valid).toBe(false);
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      // TP is auto-calculated as price * (1 + TAKE_PROFIT_PCT/100)
+      expect(result.payload.takeProfit).toBeGreaterThan(0);
+    }
   });
 
   test("normalizes symbol to uppercase", () => {

@@ -84,3 +84,17 @@ describe("Decision Logic", () => {
     expect(validTransitions["EXECUTED"]).toHaveLength(0);
   });
 });
+
+describe("MockBroker.getPositionQty", () => {
+  const broker = new MockBroker();
+
+  test("returns 0 (mock has no real positions)", async () => {
+    const qty = await broker.getPositionQty("AAPL");
+    expect(qty).toBe(0);
+  });
+
+  test("returns 0 for crypto symbol", async () => {
+    const qty = await broker.getPositionQty("BTCUSD");
+    expect(qty).toBe(0);
+  });
+});
