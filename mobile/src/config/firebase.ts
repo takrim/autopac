@@ -2,21 +2,35 @@
  * Firebase configuration for the mobile app.
  * Values are loaded from env.ts (gitignored) to prevent secrets in version control.
  */
-import { initializeApp, getApps } from "firebase/app";
-import { initializeAuth, getReactNativePersistence } from "firebase/auth";
+import { initializeApp, getApps, getApp } from "firebase/app";
+import {
+  initializeAuth,
+  getAuth,
+  getReactNativePersistence,
+  Auth,
+} from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
 import { FIREBASE_CONFIG, API_BASE_URL } from "./env";
 
 const firebaseConfig = FIREBASE_CONFIG;
 
 export { API_BASE_URL };
 
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-export const auth = initializeAuth(app, {
-  persistence: getReactNativePersistence(AsyncStorage),
-});
+// On cold start, initializeAuth sets up AsyncStorage persistence.
+// On hot reload, initializeAuth throws "already initialized" so we fall back to getAuth.
+let auth: Auth;
+try {
+  auth = initializeAuth(app, {
+    persistence: getReactNativePersistence(ReactNativeAsyncStorage),
+  });
+} catch {
+  auth = getAuth(app);
+}
+
+export { auth };
 
 export const db = getFirestore(app);
 

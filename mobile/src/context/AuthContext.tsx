@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { User } from "firebase/auth";
 import { onAuthChange } from "../services/auth";
+import { registerForPushNotifications } from "../services/notifications";
 
 interface AuthContextType {
   user: User | null;
@@ -20,6 +21,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     return unsubscribe;
   }, []);
+
+  // Register push token after user authenticates
+  useEffect(() => {
+    if (user) {
+      registerForPushNotifications();
+    }
+  }, [user]);
 
   return (
     <AuthContext.Provider value={{ user, loading }}>

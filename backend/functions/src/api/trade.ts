@@ -136,12 +136,14 @@ export async function executeOrder(
     });
 
     // Update signal status to FAILED
+    const statusMessage = `risk_check_failed: ${riskResult.reason}`;
     await db.collection("signals").doc(signal.id!).update({
       status: "FAILED",
+      statusMessage,
       updatedAt: FieldValue.serverTimestamp(),
     });
 
-    return { status: `risk_check_failed: ${riskResult.reason}` };
+    return { status: statusMessage };
   }
 
   // Place order via broker
@@ -202,10 +204,14 @@ export async function executeOrder(
 
     // Update signal status
     const signalStatus = brokerResult.success ? "EXECUTED" : "FAILED";
-    await db.collection("signals").doc(signal.id!).update({
+    const signalUpdate: Record<string, any> = {
       status: signalStatus,
       updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    if (!brokerResult.success) {
+      signalUpdate.statusMessage = brokerResult.message || "Order failed";
+    }
+    await db.collection("signals").doc(signal.id!).update(signalUpdate);
 
     await logAudit(brokerResult.success ? "ORDER_FILLED" : "ORDER_FAILED", {
       signalId: signal.id,

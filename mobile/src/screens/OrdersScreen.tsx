@@ -6,6 +6,7 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  TouchableOpacity,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Order, fetchOrders } from "../services/api";
@@ -15,13 +16,15 @@ export default function OrdersScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const loadOrders = useCallback(async () => {
     try {
+      setError(null);
       const data = await fetchOrders();
       setOrders(data);
-    } catch {
-      // Silently fail — show empty state
+    } catch (err: any) {
+      setError(err.message || "Failed to load orders");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -39,6 +42,23 @@ export default function OrdersScreen() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#e94560" />
+      </View>
+    );
+  }
+
+  if (error && orders.length === 0) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity
+          style={styles.retryButton}
+          onPress={() => {
+            setLoading(true);
+            loadOrders();
+          }}
+        >
+          <Text style={styles.retryText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -87,5 +107,21 @@ const styles = StyleSheet.create({
   },
   emptyContainer: {
     flex: 1,
+  },
+  errorText: {
+    color: "#d9534f",
+    fontSize: 16,
+    marginBottom: 12,
+  },
+  retryButton: {
+    backgroundColor: "#0f3460",
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  retryText: {
+    color: "#e94560",
+    fontSize: 14,
+    fontWeight: "600",
   },
 });

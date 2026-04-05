@@ -6,6 +6,7 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  TouchableOpacity,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Position, fetchPositions } from "../services/api";
@@ -14,13 +15,15 @@ export default function PositionsScreen() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const loadPositions = useCallback(async () => {
     try {
+      setError(null);
       const data = await fetchPositions();
       setPositions(data);
-    } catch {
-      // Show empty state
+    } catch (err: any) {
+      setError(err.message || "Failed to load positions");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -38,6 +41,23 @@ export default function PositionsScreen() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#e94560" />
+      </View>
+    );
+  }
+
+  if (error && positions.length === 0) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity
+          style={styles.retryButton}
+          onPress={() => {
+            setLoading(true);
+            loadPositions();
+          }}
+        >
+          <Text style={styles.retryText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -253,5 +273,21 @@ const styles = StyleSheet.create({
     color: "#ddd",
     fontSize: 14,
     fontWeight: "500",
+  },
+  errorText: {
+    color: "#d9534f",
+    fontSize: 16,
+    marginBottom: 12,
+  },
+  retryButton: {
+    backgroundColor: "#0f3460",
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  retryText: {
+    color: "#e94560",
+    fontSize: 14,
+    fontWeight: "600",
   },
 });

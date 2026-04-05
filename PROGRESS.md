@@ -57,21 +57,24 @@ AutoPac is a **semi-automated trading system** where:
 | Mobile: Login screen       | Done   | Email/password, sign up toggle, error handling |
 | Mobile: Signal Inbox       | Done   | Filterable list, pull-to-refresh |
 | Mobile: Signal Detail      | Done   | Full info, Approve / Reject with confirmation dialogs |
-| Mobile: Orders screen      | Done   | Executed trade history |
-| Mobile: Settings screen    | Done   | User info, sign out |
+| Mobile: Dashboard          | Done   | Portfolio value, P&L, equity chart with period selector, positions preview |
+| Mobile: Positions screen   | Done   | Open positions with P&L, summary bar, error handling + retry |
+| Mobile: Orders screen      | Done   | Executed trade history, error handling + retry |
+| Mobile: Settings screen    | Done   | Account info, broker status, notification toggle, paper trading badge, sign out |
 | Mobile: Navigation         | Done   | Bottom tabs + stack navigation |
-| Mobile: API service        | Done   | Token-authenticated fetch wrapper |
+| Mobile: API service        | Done   | Token-authenticated fetch wrapper, account/positions/portfolio history |
 | Mobile: Auth service       | Done   | Firebase Auth wrapper + AuthContext |
+| Mobile: Push notifications | Done   | Expo push token registration, foreground handling, tap-to-navigate to signal |
 | Secret management          | Done   | All secrets in env vars or gitignored `env.ts` |
 | .gitignore                 | Done   | Covers `.env`, `env.ts`, google-services, .firebaserc |
 
 ### 🔲 Not Started / Future
 
 - [ ] Firebase project creation & deployment
-- [ ] FCM setup (mobile: `expo-notifications` integration)
+- [ ] FCM end-to-end testing (mobile ↔ backend)
 - [ ] Real Alpaca broker testing (paper trading)
 - [ ] MFA (optional multi-factor auth)
-- [ ] Paper trading mode toggle in app
+- [ ] Paper trading mode toggle (dynamic, currently hardcoded ON)
 - [ ] Duplicate signal detection improvements
 - [ ] Risk config UI (max daily trades setting)
 - [ ] Second confirmation for large trades
@@ -103,7 +106,8 @@ autopac/
 │       │   │   └── tradingview.ts       # POST /webhook/tradingview handler + validation
 │       │   ├── api/
 │       │   │   ├── trade.ts             # POST /trade/approve — approval + order execution
-│       │   │   └── signals.ts           # GET /signals, /signals/:id, /orders, POST /fcm-token
+│       │   │   ├── signals.ts           # GET /signals, /signals/:id, /orders, POST /fcm-token
+│       │   │   └── alpaca.ts            # GET /account, /positions, /portfolio-history — Alpaca proxy
 │       │   ├── brokers/
 │       │   │   ├── interface.ts         # IBroker interface
 │       │   │   ├── mock.ts              # MockBroker (testing / paper trading)
@@ -135,16 +139,19 @@ autopac/
         │   └── AuthContext.tsx           # React context for auth state
         ├── services/
         │   ├── auth.ts                  # signIn / signUp / signOut / onAuthChange
-        │   └── api.ts                   # Authenticated API client (signals, orders, trade)
+        │   ├── api.ts                   # Authenticated API client (signals, orders, trade, account, positions, portfolio)
+        │   └── notifications.ts         # Expo push notifications + FCM token registration
         ├── components/
         │   ├── SignalCard.tsx            # Signal list item card
         │   └── OrderCard.tsx            # Order list item card
         ├── screens/
         │   ├── LoginScreen.tsx          # Email/password login + signup
+        │   ├── DashboardScreen.tsx      # Portfolio value, equity chart, P&L, positions preview
         │   ├── SignalInboxScreen.tsx     # Filterable signal list with pull-to-refresh
         │   ├── SignalDetailScreen.tsx    # Signal info + Approve/Reject buttons
-        │   ├── OrdersScreen.tsx         # Order history list
-        │   └── SettingsScreen.tsx       # User info + sign out
+        │   ├── PositionsScreen.tsx       # Open positions with P&L, error handling + retry
+        │   ├── OrdersScreen.tsx         # Order history list with error handling + retry
+        │   └── SettingsScreen.tsx       # Account, broker status, notifications, sign out
         └── navigation/
             └── AppNavigator.tsx         # Bottom tabs + signal stack navigation
 ```

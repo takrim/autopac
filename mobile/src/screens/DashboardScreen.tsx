@@ -6,18 +6,24 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
+  TouchableOpacity,
+  Dimensions,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import {
   AlpacaAccount,
   Position,
+  PortfolioHistory,
   fetchAccount,
   fetchPositions,
+  fetchPortfolioHistory,
 } from "../services/api";
 
 export default function DashboardScreen() {
   const [account, setAccount] = useState<AlpacaAccount | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
+  const [history, setHistory] = useState<PortfolioHistory | null>(null);
+  const [chartPeriod, setChartPeriod] = useState("1W");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,16 +31,21 @@ export default function DashboardScreen() {
   const loadData = useCallback(async () => {
     try {
       setError(null);
-      const [acct, pos] = await Promise.all([fetchAccount(), fetchPositions()]);
+      const [acct, pos, hist] = await Promise.all([
+        fetchAccount(),
+        fetchPositions(),
+        fetchPortfolioHistory(chartPeriod, chartPeriod === "1D" ? "5Min" : "1D"),
+      ]);
       setAccount(acct);
       setPositions(pos);
+      setHistory(hist);
     } catch (err: any) {
       setError(err.message || "Failed to load data");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [chartPeriod]);
 
   useFocusEffect(
     useCallback(() => {
@@ -94,6 +105,17 @@ export default function DashboardScreen() {
           <Text style={styles.heroSub}>Today</Text>
         </View>
       </View>
+
+      {/* Equity Chart */}
+      <EquityChart
+        history={history}
+        period={chartPeriod}
+        onPeriodChange={(p) => {
+          setChartPeriod(p);
+          setRefreshing(true);
+          loadData();
+        }}
+      />
 
       {/* Account Stats */}
       <View style={styles.statsRow}>
@@ -156,6 +178,95 @@ function StatCard({
     <View style={styles.statCard}>
       <Text style={styles.statLabel}>{label}</Text>
       <Text style={[styles.statValue, color ? { color } : null]}>{value}</Text>
+    </View>
+  );
+}
+
+const CHART_PERIODS = ["1D", "1W", "1M", "3M", "1A"] as const;
+const CHART_WIDTH = Dimensions.get("window").width - 64;
+const CHART_HEIGHT = 120;
+
+function EquityChart({
+  history,
+  period,
+  onPeriodChange,
+}: {
+  history: PortfolioHistory | null;
+  period: string;
+  onPeriodChange: (p: string) => void;
+}) {
+  if (!history || !history.equity || history.equity.length < 2) {
+    return (
+      <View style={styles.chartCard}>
+        <View style={styles.chartPeriodRow}>
+          {CHART_PERIODS.map((p) => (
+            <TouchableOpacity
+              key={p}
+              style={[styles.periodBtn, period === p && styles.periodBtnActive]}
+              onPress={() => onPeriodChange(p)}
+            >
+              <Text style={[styles.periodText, period === p && styles.periodTextActive]}>
+                {p}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={[styles.chartArea, { justifyContent: "center", alignItems: "center" }]}>
+          <Text style={{ color: "#666", fontSize: 13 }}>No chart data available</Text>
+        </View>
+      </View>
+    );
+  }
+
+  const equityData = history.equity.filter((v) => v != null);
+  const min = Math.min(...equityData);
+  const max = Math.max(...equityData);
+  const range = max - min || 1;
+  const isPositive = equityData[equityData.length - 1] >= equityData[0];
+  const lineColor = isPositive ? "#5cb85c" : "#d9534f";
+
+  return (
+    <View style={styles.chartCard}>
+      <View style={styles.chartPeriodRow}>
+        {CHART_PERIODS.map((p) => (
+          <TouchableOpacity
+            key={p}
+            style={[styles.periodBtn, period === p && styles.periodBtnActive]}
+            onPress={() => onPeriodChange(p)}
+          >
+            <Text style={[styles.periodText, period === p && styles.periodTextActive]}>
+              {p}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <View style={styles.chartArea}>
+        {/* Y-axis labels */}
+        <View style={styles.yAxis}>
+          <Text style={styles.yLabel}>${(max / 1000).toFixed(1)}k</Text>
+          <Text style={styles.yLabel}>${(min / 1000).toFixed(1)}k</Text>
+        </View>
+        {/* Bar chart visualization */}
+        <View style={styles.chartBars}>
+          {equityData.map((val, i) => {
+            const heightPct = ((val - min) / range) * 100;
+            return (
+              <View key={i} style={styles.barContainer}>
+                <View
+                  style={[
+                    styles.bar,
+                    {
+                      height: `${Math.max(heightPct, 2)}%`,
+                      backgroundColor: lineColor,
+                      opacity: 0.3 + (i / equityData.length) * 0.7,
+                    },
+                  ]}
+                />
+              </View>
+            );
+          })}
+        </View>
+      </View>
     </View>
   );
 }
@@ -284,5 +395,65 @@ const styles = StyleSheet.create({
   posDetail: {
     color: "#888",
     fontSize: 13,
+  },
+  chartCard: {
+    backgroundColor: "#16213e",
+    marginHorizontal: 16,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#0f3460",
+  },
+  chartPeriodRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 8,
+    marginBottom: 12,
+  },
+  periodBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "#1a1a2e",
+  },
+  periodBtnActive: {
+    backgroundColor: "#0f3460",
+  },
+  periodText: {
+    color: "#666",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  periodTextActive: {
+    color: "#e94560",
+  },
+  chartArea: {
+    height: CHART_HEIGHT,
+    flexDirection: "row",
+  },
+  yAxis: {
+    width: 44,
+    justifyContent: "space-between",
+    paddingVertical: 4,
+  },
+  yLabel: {
+    color: "#555",
+    fontSize: 10,
+  },
+  chartBars: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 1,
+  },
+  barContainer: {
+    flex: 1,
+    height: "100%",
+    justifyContent: "flex-end",
+  },
+  bar: {
+    borderRadius: 1,
+    minHeight: 2,
   },
 });

@@ -47,6 +47,7 @@ export interface Signal {
   takeProfit: number;
   signalTime: string;
   status: "PENDING" | "APPROVED" | "REJECTED" | "EXECUTED" | "FAILED";
+  statusMessage?: string;
   createdAt: any;
 }
 

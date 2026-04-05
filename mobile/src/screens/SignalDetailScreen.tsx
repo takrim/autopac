@@ -124,6 +124,13 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
         <Text style={styles.statusText}>{signal.status}</Text>
       </View>
 
+      {/* Status Message (for failed signals) */}
+      {signal.statusMessage ? (
+        <View style={styles.statusMessageBar}>
+          <Text style={styles.statusMessageText}>{signal.statusMessage}</Text>
+        </View>
+      ) : null}
+
       {/* Details */}
       <View style={styles.section}>
         <DetailRow label="Strategy" value={signal.strategy} />
@@ -233,6 +240,18 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 16,
     fontWeight: "bold",
+  },
+  statusMessageBar: {
+    backgroundColor: "rgba(217, 83, 79, 0.15)",
+    borderWidth: 1,
+    borderColor: "#d9534f",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 20,
+  },
+  statusMessageText: {
+    color: "#ff6b6b",
+    fontSize: 14,
   },
   section: {
     backgroundColor: "#16213e",

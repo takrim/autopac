@@ -18,23 +18,23 @@
       "adaptiveIcon": {
         "backgroundColor": "#1a1a2e"
       },
-      "package": "com.autopac.app",
-      "googleServicesFile": "./google-services.json"
+      "package": "com.autopac.app"
     },
     "plugins": [
-      "expo-router",
       [
         "expo-notifications",
         {
           "icon": "./assets/icon.png",
           "color": "#e94560"
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "extra": {
       "eas": {
-        "projectId": "your-project-id"
+        "projectId": "13da6bb8-4b14-438f-b518-9a41b4619b09"
       }
-    }
+    },
+    "owner": "takrimk"
   }
 }

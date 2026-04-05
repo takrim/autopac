@@ -26,6 +26,8 @@ mobile/src/config/env.ts
 # Expo / React Native
 mobile/.expo/
 mobile/dist/
+mobile/ios/
+mobile/android/
 *.jks
 *.p8
 *.p12

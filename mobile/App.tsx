@@ -1,18 +1,19 @@
 import React, { useEffect, useRef } from "react";
-import { NavigationContainer } from "@react-navigation/native";
+import { NavigationContainer, NavigationContainerRef } from "@react-navigation/native";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { AuthProvider } from "./src/context/AuthContext";
 import AppNavigator from "./src/navigation/AppNavigator";
-import { registerForPushNotifications } from "./src/services/notifications";
+
+export const navigationRef = React.createRef<NavigationContainerRef<any>>();
 
 export default function App() {
   const notificationListener = useRef<Notifications.EventSubscription>();
   const responseListener = useRef<Notifications.EventSubscription>();
 
   useEffect(() => {
-    // Register for push notifications
-    registerForPushNotifications();
+    // Push token registration is handled in AuthContext after login.
+    // Here we only set up notification listeners.
 
     // Listen for incoming notifications (foreground)
     notificationListener.current = Notifications.addNotificationReceivedListener(
@@ -21,12 +22,20 @@ export default function App() {
       }
     );
 
-    // Listen for notification taps
+    // Listen for notification taps — navigate to signal detail
     responseListener.current = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         const data = response.notification.request.content.data;
         console.log("[APP] Notification tapped:", data);
-        // Navigation to signal detail could be handled here
+        if (data?.signalId && navigationRef.current) {
+          navigationRef.current.navigate("Main", {
+            screen: "SignalsTab",
+            params: {
+              screen: "SignalDetail",
+              params: { signalId: data.signalId },
+            },
+          });
+        }
       }
     );
 
@@ -42,7 +51,7 @@ export default function App() {
 
   return (
     <AuthProvider>
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <StatusBar style="light" />
         <AppNavigator />
       </NavigationContainer>
