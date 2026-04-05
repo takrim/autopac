@@ -120,16 +120,27 @@ jest.mock("firebase-functions/v2/https", () => ({
 
 jest.mock("../src/config", () => ({
   getWebhookSecret: () => "TEST_SECRET_KEY",
+  getAlpacaConfig: () => ({
+    apiKey: "",
+    apiSecret: "",
+    baseUrl: "https://paper-api.alpaca.markets",
+  }),
   CONFIG: {
     MAX_SIGNAL_AGE_SECONDS: 300,
     WEBHOOK_SECRET_HEADER: "x-webhook-secret",
     RATE_LIMIT_WINDOW_MS: 60000,
     RATE_LIMIT_MAX_REQUESTS: 30,
-    DEFAULT_TRADE_QUANTITY: 1,
+    TRADE_VALUE_USD: 1000,
     DEFAULT_ORDER_TYPE: "market",
     MAX_DAILY_TRADES: 20,
     MAX_POSITION_VALUE: 50000,
+    STOP_LOSS_PCT: 0.5,
+    TAKE_PROFIT_PCT: 2.0,
+    ALLOWED_DIRECTIONS: "BOTH",
+    ALLOWED_ORDER_COMMENTS: [],
     ACTIVE_BROKER: "mock",
+    ORDER_PYRAMID: false,
+    AUTO_APPROVE: false,
     PAPER_TRADING: true,
   },
 }));

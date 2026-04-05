@@ -7,4 +7,5 @@ import { PlaceOrderParams, PlaceOrderResult } from "../types";
 export interface IBroker {
   readonly name: string;
   placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult>;
+  getPositionQty(symbol: string): Promise<number>;
 }

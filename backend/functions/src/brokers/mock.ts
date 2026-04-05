@@ -10,6 +10,11 @@ import { PlaceOrderParams, PlaceOrderResult } from "../types";
 export class MockBroker implements IBroker {
   readonly name = "mock";
 
+  async getPositionQty(_symbol: string): Promise<number> {
+    // Mock broker doesn't track real positions; return 0
+    return 0;
+  }
+
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     logger.info("[MOCK_BROKER] Placing order", params);
 

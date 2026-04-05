@@ -148,7 +148,24 @@ export async function executeOrder(
 
   // Place order via broker
   const broker = getBroker();
-  const quantity = CONFIG.TRADE_VALUE_USD / signal.price;
+
+  // For SELL (liquidation), use the actual position quantity from the broker
+  // instead of a fixed dollar-amount calculation, to avoid insufficient balance errors.
+  let quantity: number;
+  if (signal.action === "SELL") {
+    quantity = await broker.getPositionQty(signal.symbol);
+    if (quantity <= 0) {
+      const statusMessage = "no_position_to_sell";
+      await db.collection("signals").doc(signal.id!).update({
+        status: "FAILED",
+        statusMessage,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return { status: statusMessage };
+    }
+  } else {
+    quantity = CONFIG.TRADE_VALUE_USD / signal.price;
+  }
 
   const order: Order = {
     signalId: signal.id!,

@@ -25,6 +25,44 @@ export class AlpacaBroker implements IBroker {
     };
   }
 
+  /**
+   * Resolve the Alpaca-compatible symbol format.
+   */
+  private resolveSymbol(symbol: string): { isCrypto: boolean; alpacaSymbol: string; posSymbol: string } {
+    const isCrypto = symbol.endsWith("USD") || symbol.endsWith("USDT") || symbol.includes("/");
+    const alpacaSymbol = isCrypto && !symbol.includes("/")
+      ? symbol.replace(/USDT?$/, "") + "/USD"
+      : symbol;
+    const posSymbol = alpacaSymbol.replace("/", "");
+    return { isCrypto, alpacaSymbol, posSymbol };
+  }
+
+  /**
+   * Get the current position quantity for a symbol from Alpaca.
+   * Returns 0 if no position exists or on error.
+   */
+  async getPositionQty(symbol: string): Promise<number> {
+    const config = this.getConfig();
+    const { posSymbol } = this.resolveSymbol(symbol);
+
+    try {
+      const resp = await fetch(
+        `${config.baseUrl}/v2/positions/${encodeURIComponent(posSymbol)}`,
+        { headers: this.getHeaders() }
+      );
+      if (!resp.ok) {
+        logger.info("[ALPACA] No position found", { symbol: posSymbol, status: resp.status });
+        return 0;
+      }
+      const posData = await resp.json() as Record<string, unknown>;
+      const qty = parseFloat(posData.qty as string || "0");
+      return Math.abs(qty);
+    } catch (err) {
+      logger.warn("[ALPACA] getPositionQty error", { symbol, err: String(err) });
+      return 0;
+    }
+  }
+
   private async submitOrder(body: Record<string, unknown>): Promise<{ ok: boolean; data: Record<string, unknown> }> {
     const config = this.getConfig();
     const response = await fetch(`${config.baseUrl}/v2/orders`, {
@@ -84,10 +122,7 @@ export class AlpacaBroker implements IBroker {
     }
 
     // Alpaca crypto symbols use "BTC/USD" format, not "BTCUSD"
-    const isCrypto = params.symbol.endsWith("USD") || params.symbol.endsWith("USDT") || params.symbol.includes("/");
-    const symbol = isCrypto && !params.symbol.includes("/")
-      ? params.symbol.replace(/USDT?$/, "") + "/USD"
-      : params.symbol;
+    const { isCrypto, alpacaSymbol: symbol } = this.resolveSymbol(params.symbol);
 
     const orderBody: Record<string, unknown> = {
       symbol,
@@ -96,9 +131,14 @@ export class AlpacaBroker implements IBroker {
       time_in_force: isCrypto ? "gtc" : "day",
     };
 
-    // For crypto: use notional (dollar amount) — Alpaca calculates the exact qty
+    // For crypto BUY: use notional (dollar amount) — Alpaca calculates the exact qty
+    // For crypto SELL: use qty (actual position size) to avoid insufficient balance
     if (isCrypto) {
-      orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
+      if (params.side === "SELL") {
+        orderBody.qty = params.quantity.toString();
+      } else {
+        orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
+      }
     } else {
       orderBody.qty = params.quantity.toString();
     }
