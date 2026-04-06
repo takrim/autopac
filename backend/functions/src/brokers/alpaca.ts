@@ -100,15 +100,23 @@ export class AlpacaBroker implements IBroker {
     if (isCrypto) {
       orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
     } else {
-      orderBody.qty = params.quantity.toString();
+      // Alpaca: fractional orders must be "simple" (no bracket/oto).
+      // Round down to whole shares so we can use bracket orders with SL/TP.
+      const wholeQty = Math.floor(params.quantity);
+      if (wholeQty < 1) {
+        // If trade value is too small for even 1 share, use notional instead (simple order)
+        orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
+      } else {
+        orderBody.qty = wholeQty.toString();
+      }
     }
 
     if (params.orderType === "limit" && params.limitPrice) {
       orderBody.limit_price = params.limitPrice.toString();
     }
 
-    // For stocks: use bracket orders for SL/TP
-    if (!isCrypto) {
+    // For stocks: use bracket orders for SL/TP (only when qty is whole shares)
+    if (!isCrypto && orderBody.qty) {
       if (params.stopLoss && params.takeProfit) {
         orderBody.order_class = "bracket";
         orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
