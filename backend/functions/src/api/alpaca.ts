@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { logger } from "firebase-functions/v2";
-import { getAlpacaConfig } from "../config";
+import { CONFIG, getAlpacaConfig } from "../config";
 
 function getHeaders() {
   const config = getAlpacaConfig();
@@ -81,21 +81,47 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
     }
 
     const positions = (await resp.json()) as Array<Record<string, unknown>>;
-    const mapped = positions.map((p) => ({
-      symbol: p.symbol,
-      qty: p.qty,
-      avg_entry_price: p.avg_entry_price,
-      current_price: p.current_price,
-      market_value: p.market_value,
-      cost_basis: p.cost_basis,
-      unrealized_pl: p.unrealized_pl,
-      unrealized_plpc: p.unrealized_plpc,
-      unrealized_intraday_pl: p.unrealized_intraday_pl,
-      unrealized_intraday_plpc: p.unrealized_intraday_plpc,
-      change_today: p.change_today,
-      side: p.side,
-      asset_class: p.asset_class,
-    }));
+    const feeRate = CONFIG.SIMULATED_FEE_RATE;
+
+    const mapped = positions.map((p) => {
+      const qty = parseFloat(p.qty as string);
+      const entryPrice = parseFloat(p.avg_entry_price as string);
+      const currentPrice = parseFloat(p.current_price as string);
+      const marketValue = parseFloat(p.market_value as string);
+      const costBasis = parseFloat(p.cost_basis as string);
+
+      // Simulate realistic fees: entry fee (already paid) + exit fee (to be paid)
+      const entryFee = costBasis * feeRate;
+      const exitFee = marketValue * feeRate;
+      const totalFees = entryFee + exitFee;
+
+      const adjCostBasis = costBasis + entryFee;
+      const adjUnrealizedPl = marketValue - adjCostBasis - exitFee;
+      const adjUnrealizedPlPct = adjCostBasis > 0 ? adjUnrealizedPl / adjCostBasis : 0;
+
+      // Intraday: same fee adjustment relative to start-of-day price
+      const intradayPl = parseFloat((p.unrealized_intraday_pl as string) || "0");
+      const adjIntradayPl = intradayPl - exitFee;
+      const adjIntradayPlPct = marketValue > 0 ? adjIntradayPl / marketValue : 0;
+
+      return {
+        symbol: p.symbol,
+        qty: p.qty,
+        avg_entry_price: p.avg_entry_price,
+        current_price: p.current_price,
+        market_value: p.market_value,
+        cost_basis: adjCostBasis.toFixed(6),
+        unrealized_pl: adjUnrealizedPl.toFixed(6),
+        unrealized_plpc: adjUnrealizedPlPct.toFixed(6),
+        unrealized_intraday_pl: adjIntradayPl.toFixed(6),
+        unrealized_intraday_plpc: adjIntradayPlPct.toFixed(6),
+        change_today: p.change_today,
+        side: p.side,
+        asset_class: p.asset_class,
+        simulated_fees: totalFees.toFixed(6),
+        fee_rate: feeRate,
+      };
+    });
 
     res.json({ positions: mapped });
   } catch (err) {

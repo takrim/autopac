@@ -42,6 +42,11 @@ export const CONFIG = {
 
   // Paper trading mode
   PAPER_TRADING: process.env.PAPER_TRADING !== "false",
+
+  // Simulated fee rate per side (entry + exit) to approximate real exchange costs.
+  // Default matches Coinbase Advanced taker fee for < $10K/month volume (0.6%).
+  // Set SIMULATED_FEE_RATE=0 to disable, or 0.004 for Coinbase maker fee.
+  SIMULATED_FEE_RATE: parseFloat(process.env.SIMULATED_FEE_RATE || "0.006"),
 } as const;
 
 /**

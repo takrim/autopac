@@ -137,6 +137,8 @@ function PositionCard({ position, onLiquidated }: { position: Position; onLiquid
   const current = parseFloat(position.current_price);
   const marketValue = parseFloat(position.market_value || "0");
   const costBasis = parseFloat(position.cost_basis || "0");
+  const simulatedFees = parseFloat(position.simulated_fees || "0");
+  const feeRate = position.fee_rate ?? 0.006;
 
   const handleLiquidate = () => {
     Alert.alert(
@@ -253,6 +255,13 @@ function PositionCard({ position, onLiquidated }: { position: Position; onLiquid
             value={`${intradayPl >= 0 ? "+" : ""}$${intradayPl.toFixed(2)}`}
             color={intradayPl >= 0 ? "#5cb85c" : "#d9534f"}
           />
+          {simulatedFees > 0 && (
+            <DetailItem
+              label={`Fees (${(feeRate * 100).toFixed(1)}%×2)`}
+              value={`-$${simulatedFees.toFixed(2)}`}
+              color="#e94560"
+            />
+          )}
         </View>
       </View>
     </Swipeable>

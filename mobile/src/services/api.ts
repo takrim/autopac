@@ -143,6 +143,8 @@ export interface Position {
   change_today: string;
   side: string;
   asset_class: string;
+  simulated_fees?: string;
+  fee_rate?: number;
 }
 
 export async function fetchPositions(): Promise<Position[]> {
