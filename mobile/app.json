@@ -12,7 +12,10 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.autopac.app"
+      "bundleIdentifier": "com.autopac.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -31,6 +34,13 @@
       "expo-asset"
     ],
     "extra": {
+      "firebaseApiKey": "AIzaSyDG0NhyJdUa42SX36q0TgFj8W66P-4941k",
+      "firebaseAuthDomain": "autopac-40a4e.firebaseapp.com",
+      "firebaseProjectId": "autopac-40a4e",
+      "firebaseStorageBucket": "autopac-40a4e.firebasestorage.app",
+      "firebaseMessagingSenderId": "523907681080",
+      "firebaseAppId": "1:523907681080:web:be06a39c9440a2a1464fcd",
+      "apiBaseUrl": "https://api-zxkxr5yqeq-uc.a.run.app",
       "eas": {
         "projectId": "13da6bb8-4b14-438f-b518-9a41b4619b09"
       }

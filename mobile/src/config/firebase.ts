@@ -1,6 +1,6 @@
 /**
  * Firebase configuration for the mobile app.
- * Values are loaded from env.ts (gitignored) to prevent secrets in version control.
+ * Values are loaded from app.json extra config via expo-constants.
  */
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
@@ -11,11 +11,20 @@ import {
 } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
-import { FIREBASE_CONFIG, API_BASE_URL } from "./env";
+import Constants from "expo-constants";
 
-const firebaseConfig = FIREBASE_CONFIG;
+const extra = Constants.expoConfig?.extra ?? {};
 
-export { API_BASE_URL };
+const firebaseConfig = {
+  apiKey: extra.firebaseApiKey,
+  authDomain: extra.firebaseAuthDomain,
+  projectId: extra.firebaseProjectId,
+  storageBucket: extra.firebaseStorageBucket,
+  messagingSenderId: extra.firebaseMessagingSenderId,
+  appId: extra.firebaseAppId,
+};
+
+export const API_BASE_URL: string = extra.apiBaseUrl;
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 

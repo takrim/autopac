@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 3.0.0"
+    "version": ">= 3.0.0",
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
@@ -13,9 +14,23 @@
     "preview": {
       "distribution": "internal"
     },
+    "testflight": {
+      "distribution": "store",
+      "autoIncrement": true,
+      "ios": {
+        "buildConfiguration": "Release"
+      }
+    },
     "production": {}
   },
   "submit": {
+    "testflight": {
+      "ios": {
+        "appleId": "takrimkhan@gmail.com",
+        "ascAppId": "6761690000",
+        "appleTeamId": "Z3JJLJD2UT"
+      }
+    },
     "production": {}
   }
 }

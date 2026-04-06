@@ -150,6 +150,12 @@ export async function fetchPositions(): Promise<Position[]> {
   return data.positions;
 }
 
+export async function liquidatePosition(symbol: string): Promise<{ status: string; cancelledOrders: number }> {
+  return apiRequest(`/positions/${encodeURIComponent(symbol)}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Portfolio History ---
 
 export interface PortfolioHistory {

@@ -23,6 +23,7 @@ import {
   handleGetAccount,
   handleGetPositions,
   handleGetPortfolioHistory,
+  handleLiquidatePosition,
 } from "./api/alpaca";
 
 // --- Webhook App (no auth — uses shared secret) ---
@@ -49,6 +50,7 @@ apiApp.get("/broker-errors", handleListBrokerErrors);
 apiApp.post("/fcm-token", handleRegisterToken);
 apiApp.get("/account", handleGetAccount);
 apiApp.get("/positions", handleGetPositions);
+apiApp.delete("/positions/:symbol", handleLiquidatePosition);
 apiApp.get("/portfolio-history", handleGetPortfolioHistory);
 
 // --- Export Cloud Functions ---

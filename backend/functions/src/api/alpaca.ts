@@ -105,6 +105,96 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
 }
 
 /**
+ * DELETE /positions/:symbol — liquidate a position and cancel open orders for that symbol.
+ */
+export async function handleLiquidatePosition(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const { symbol } = req.params;
+  if (!symbol) {
+    res.status(400).json({ error: "Missing symbol" });
+    return;
+  }
+
+  try {
+    const config = getAlpacaConfig();
+    const headers = getHeaders();
+
+    // For crypto, Alpaca uses slash-separated symbols for orders (e.g. "LTC/USD")
+    // but positions use concatenated symbols (e.g. "LTCUSD"). Try both for order lookup.
+    const cryptoSymbol = symbol.endsWith("USD") && !symbol.includes("/")
+      ? symbol.slice(0, -3) + "/USD"
+      : symbol;
+
+    // 1. Cancel all open orders for this symbol FIRST
+    //    Open stop/limit orders lock the balance and prevent liquidation.
+    let cancelledCount = 0;
+    try {
+      // Try both symbol formats for order lookup
+      for (const sym of [symbol, cryptoSymbol]) {
+        const ordersResp = await fetch(
+          `${config.baseUrl}/v2/orders?status=open&symbols=${encodeURIComponent(sym)}&limit=100`,
+          { headers }
+        );
+        if (ordersResp.ok) {
+          const orders = (await ordersResp.json()) as Array<{ id: string }>;
+          for (const order of orders) {
+            const cancelResp = await fetch(`${config.baseUrl}/v2/orders/${order.id}`, {
+              method: "DELETE",
+              headers,
+            });
+            if (cancelResp.ok || cancelResp.status === 204) {
+              cancelledCount++;
+            }
+          }
+        }
+      }
+      if (cancelledCount > 0) {
+        logger.info("[API] Cancelled open orders before liquidation", { symbol, cancelledCount });
+      }
+    } catch (cancelErr) {
+      logger.warn("[API] Error cancelling orders for symbol", { symbol, err: String(cancelErr) });
+    }
+
+    // 2. Liquidate the position
+    const posSymbol = encodeURIComponent(symbol);
+    const closeResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, {
+      method: "DELETE",
+      headers,
+    });
+
+    if (!closeResp.ok) {
+      let errMsg = await closeResp.text();
+      try {
+        const errJson = JSON.parse(errMsg);
+        if (errJson && errJson.message) errMsg = errJson.message;
+      } catch {}
+      errMsg = (errMsg || "Unknown error").toString().trim();
+      logger.error("[API] Alpaca position liquidation failed", { symbol, status: closeResp.status, err: errMsg });
+      res.status(502).json({ error: `Failed to liquidate ${symbol}: ${errMsg}` });
+      return;
+    }
+
+    const closeData = (await closeResp.json()) as Record<string, unknown>;
+
+    logger.info("[API] Position liquidated", { symbol, cancelledOrders: cancelledCount });
+    res.json({
+      status: "liquidated",
+      symbol,
+      order: closeData,
+      cancelledOrders: cancelledCount,
+    });
+  } catch (err) {
+    logger.error("[API] Liquidation request error", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
  * GET /portfolio-history — proxy Alpaca portfolio history for chart data.
  */
 export async function handleGetPortfolioHistory(req: Request, res: Response): Promise<void> {
