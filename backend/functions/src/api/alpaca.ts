@@ -91,17 +91,18 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
       const currentPrice = parseFloat(p.current_price as string);
       const marketValue = parseFloat(p.market_value as string);
       const costBasis = parseFloat(p.cost_basis as string);
+      const isCrypto = (p.asset_class as string || "").toLowerCase() === "crypto";
 
-      // Simulate realistic fees: entry fee (already paid) + exit fee (to be paid)
-      const entryFee = costBasis * feeRate;
-      const exitFee = marketValue * feeRate;
+      // Simulate exchange fees only for crypto (stocks are commission-free on Alpaca)
+      const effectiveFeeRate = isCrypto ? feeRate : 0;
+      const entryFee = costBasis * effectiveFeeRate;
+      const exitFee = marketValue * effectiveFeeRate;
       const totalFees = entryFee + exitFee;
 
       const adjCostBasis = costBasis + entryFee;
       const adjUnrealizedPl = marketValue - adjCostBasis - exitFee;
       const adjUnrealizedPlPct = adjCostBasis > 0 ? adjUnrealizedPl / adjCostBasis : 0;
 
-      // Intraday: same fee adjustment relative to start-of-day price
       const intradayPl = parseFloat((p.unrealized_intraday_pl as string) || "0");
       const adjIntradayPl = intradayPl - exitFee;
       const adjIntradayPlPct = marketValue > 0 ? adjIntradayPl / marketValue : 0;
@@ -121,7 +122,7 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
         side: p.side,
         asset_class: p.asset_class,
         simulated_fees: totalFees.toFixed(6),
-        fee_rate: feeRate,
+        fee_rate: effectiveFeeRate,
       };
     });
 

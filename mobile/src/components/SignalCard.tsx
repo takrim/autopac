@@ -37,13 +37,11 @@ export default function SignalCard({ signal, onPress }: Props) {
         <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
         <View style={styles.indicatorRow}>
           <Text style={styles.strategy}>{signal.strategy}</Text>
-          {signal.rsiTrend && (
+          {signal.rsi != null && (
             <View style={[styles.rsiBadge, {
-              backgroundColor: signal.rsiTrend === "bullish" ? "#5cb85c" : signal.rsiTrend === "bearish" ? "#d9534f" : "#0f3460",
+              backgroundColor: signal.rsi < 30 ? "#5cb85c" : signal.rsi > 70 ? "#d9534f" : "#0f3460",
             }]}>
-              <Text style={styles.rsiText}>
-                {signal.rsiTrend === "bullish" ? "▲" : signal.rsiTrend === "bearish" ? "▼" : "—"} RSI {signal.rsiConfidence || ""}
-              </Text>
+              <Text style={styles.rsiText}>RSI {signal.rsi.toFixed(0)}</Text>
             </View>
           )}
           {signal.vwapTrend && (
@@ -51,7 +49,7 @@ export default function SignalCard({ signal, onPress }: Props) {
               backgroundColor: signal.vwapTrend === "bullish" ? "#5cb85c" : signal.vwapTrend === "bearish" ? "#d9534f" : "#0f3460",
             }]}>
               <Text style={styles.rsiText}>
-                {signal.vwapTrend === "bullish" ? "▲" : signal.vwapTrend === "bearish" ? "▼" : "—"} VWAP
+                {signal.vwapTrend === "bullish" ? "▲ Above" : signal.vwapTrend === "bearish" ? "▼ Below" : "= At"} VWAP
               </Text>
             </View>
           )}

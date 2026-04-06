@@ -144,19 +144,21 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           value={signal.takeProfit ? `$${signal.takeProfit.toFixed(2)}` : "—"}
         />
         <DetailRow
-          label="RSI Trend"
-          value={signal.rsiTrend ? `${signal.rsiTrend} (${signal.rsiConfidence || "?"})` : "Awaiting…"}
+          label="RSI (14)"
+          value={signal.rsi != null ? `${signal.rsi.toFixed(1)} — ${signal.rsiTrend || ""}` : "Calculating…"}
           valueColor={
-            signal.rsiTrend === "bullish"
-              ? "#5cb85c"
-              : signal.rsiTrend === "bearish"
-                ? "#d9534f"
-                : "#666"
+            signal.rsi != null
+              ? signal.rsi < 30 ? "#5cb85c" : signal.rsi > 70 ? "#d9534f" : "#fff"
+              : "#666"
           }
         />
         <DetailRow
-          label="VWAP Trend"
-          value={signal.vwapTrend || "Awaiting…"}
+          label="VWAP"
+          value={
+            signal.vwapPrice
+              ? `$${signal.vwapPrice.toFixed(2)} — ${signal.vwapTrend === "bullish" ? "Price Above" : signal.vwapTrend === "bearish" ? "Price Below" : "At VWAP"}`
+              : "Calculating…"
+          }
           valueColor={
             signal.vwapTrend === "bullish"
               ? "#5cb85c"

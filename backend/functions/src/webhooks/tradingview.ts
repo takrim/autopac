@@ -8,6 +8,7 @@ import { getTradingConfig, TradingConfig } from "../api/config";
 import { sendSignalNotification } from "../services/notification";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
+import { calculateIndicators } from "../services/indicators";
 
 const db = getFirestore();
 
@@ -268,6 +269,30 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   signal.id = docRef.id;
 
   await logAudit("SIGNAL_VALIDATED", { signalId: docRef.id });
+
+  // Calculate RSI(14) and VWAP for the signal — non-blocking, don't fail the webhook
+  try {
+    const indicators = await calculateIndicators(payload.symbol, payload.price);
+    const indicatorUpdate: Record<string, unknown> = {};
+    if (indicators.rsi !== null) {
+      indicatorUpdate.rsi = parseFloat(indicators.rsi.toFixed(2));
+      indicatorUpdate.rsiTrend = indicators.rsi < 30 ? "bullish" : indicators.rsi > 70 ? "bearish" : "neutral";
+      indicatorUpdate.rsiConfidence = indicators.rsi < 20 || indicators.rsi > 80 ? "strong" : indicators.rsi < 30 || indicators.rsi > 70 ? "confirmed" : "early";
+    }
+    if (indicators.vwap !== null) {
+      indicatorUpdate.vwapTrend = indicators.vwapTrend;
+      indicatorUpdate.vwapPrice = parseFloat(indicators.vwap.toFixed(4));
+    }
+    if (Object.keys(indicatorUpdate).length > 0) {
+      indicatorUpdate.rsiUpdatedAt = FieldValue.serverTimestamp();
+      indicatorUpdate.vwapUpdatedAt = FieldValue.serverTimestamp();
+      indicatorUpdate.updatedAt = FieldValue.serverTimestamp();
+      await docRef.update(indicatorUpdate);
+      logger.info("[WEBHOOK] Indicators attached to signal", { signalId: docRef.id, ...indicatorUpdate });
+    }
+  } catch (err) {
+    logger.error("[WEBHOOK] Indicator calculation failed (non-fatal)", { err: String(err) });
+  }
 
   // Send push notification
   try {
