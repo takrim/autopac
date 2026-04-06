@@ -89,12 +89,25 @@ export class AlpacaBroker implements IBroker {
       ? params.symbol.replace(/USDT?$/, "") + "/USD"
       : params.symbol;
 
+    // For stocks: always use limit order at signal price with extended_hours enabled.
+    // This allows fills during pre-market and after-hours sessions.
     const orderBody: Record<string, unknown> = {
       symbol,
       side: params.side.toLowerCase(),
-      type: params.orderType,
+      type: isCrypto ? params.orderType : "limit",
       time_in_force: isCrypto ? "gtc" : "day",
     };
+
+    if (!isCrypto) {
+      // Use the signal price as the limit price
+      const signalPrice = params.limitPrice || (CONFIG.TRADE_VALUE_USD / params.quantity);
+      // Add 1% slippage buffer for BUY, subtract for SELL
+      const limitPrice = params.side === "BUY"
+        ? (signalPrice * 1.01).toFixed(2)
+        : (signalPrice * 0.99).toFixed(2);
+      orderBody.limit_price = limitPrice;
+      orderBody.extended_hours = true;
+    }
 
     // For crypto: use notional (dollar amount) — Alpaca calculates the exact qty
     if (isCrypto) {
@@ -104,28 +117,39 @@ export class AlpacaBroker implements IBroker {
       // Round down to whole shares so we can use bracket orders with SL/TP.
       const wholeQty = Math.floor(params.quantity);
       if (wholeQty < 1) {
-        // If trade value is too small for even 1 share, use notional instead (simple order)
         orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
       } else {
         orderBody.qty = wholeQty.toString();
       }
     }
 
-    if (params.orderType === "limit" && params.limitPrice) {
-      orderBody.limit_price = params.limitPrice.toString();
-    }
+    // Check if US stock market is currently open (9:30 AM–4:00 PM ET, Mon-Fri)
+    const isMarketOpen = (() => {
+      const now = new Date();
+      const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay();
+      if (day === 0 || day === 6) return false; // Weekend
+      const mins = et.getHours() * 60 + et.getMinutes();
+      return mins >= 570 && mins < 960; // 9:30=570, 16:00=960
+    })();
 
-    // For stocks: try bracket orders for SL/TP (only when qty is whole shares)
+    // For stocks: use bracket orders with SL/TP only during market hours.
+    // Extended hours require simple limit orders (no bracket).
     let useBracket = false;
-    if (!isCrypto && orderBody.qty && params.stopLoss && params.takeProfit) {
+    if (!isCrypto && isMarketOpen && orderBody.qty && params.stopLoss && params.takeProfit) {
       orderBody.order_class = "bracket";
       orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
       orderBody.take_profit = { limit_price: params.takeProfit.toString() };
+      delete orderBody.extended_hours; // bracket doesn't support extended hours
       useBracket = true;
-    } else if (!isCrypto && orderBody.qty && params.stopLoss) {
+      logger.info("[ALPACA] Market open — using bracket order", { symbol });
+    } else if (!isCrypto && isMarketOpen && orderBody.qty && params.stopLoss) {
       orderBody.order_class = "oto";
       orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
+      delete orderBody.extended_hours;
       useBracket = true;
+    } else if (!isCrypto && !isMarketOpen) {
+      logger.info("[ALPACA] Market closed — using limit order with extended hours", { symbol });
     }
 
     try {
@@ -144,17 +168,18 @@ export class AlpacaBroker implements IBroker {
         logger.info("[ALPACA] Existing position found, keeping open orders", { symbol });
       }
 
-      logger.info("[ALPACA] Placing order", { symbol, side: params.side, isCrypto, bracket: useBracket });
+      logger.info("[ALPACA] Placing order", { symbol, side: params.side, isCrypto, bracket: useBracket, extended: !!orderBody.extended_hours });
 
       let { ok, data } = await this.submitOrder(orderBody);
 
-      // If bracket order failed, retry as a simple order without SL/TP
+      // If bracket order failed, retry as simple limit order with extended hours
       if (!ok && useBracket) {
         const errMsg = String(data.message || "");
-        logger.warn("[ALPACA] Bracket order failed, retrying as simple order", { symbol, error: errMsg });
+        logger.warn("[ALPACA] Bracket order failed, retrying as simple limit order", { symbol, error: errMsg });
         delete orderBody.order_class;
         delete orderBody.stop_loss;
         delete orderBody.take_profit;
+        orderBody.extended_hours = true;
         const retry = await this.submitOrder(orderBody);
         ok = retry.ok;
         data = retry.data;
