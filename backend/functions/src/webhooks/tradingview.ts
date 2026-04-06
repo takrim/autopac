@@ -4,6 +4,7 @@ import { logger } from "firebase-functions/v2";
 import crypto from "crypto";
 import { WebhookPayload, Signal } from "../types";
 import { getWebhookSecret, CONFIG, getAlpacaConfig } from "../config";
+import { getTradingConfig, TradingConfig } from "../api/config";
 import { sendSignalNotification } from "../services/notification";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
@@ -24,7 +25,8 @@ const REQUIRED_FIELDS: (keyof WebhookPayload)[] = [
  * Validate the webhook payload structure and security.
  */
 export function validatePayload(
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  tradingConfig?: TradingConfig
 ): { valid: true; payload: WebhookPayload } | { valid: false; error: string } {
   // Check required fields
   for (const field of REQUIRED_FIELDS) {
@@ -40,7 +42,7 @@ export function validatePayload(
   }
 
   // Filter by allowed trade directions
-  const allowed = CONFIG.ALLOWED_DIRECTIONS;
+  const allowed = tradingConfig?.ALLOWED_DIRECTIONS ?? CONFIG.ALLOWED_DIRECTIONS;
   if (allowed === "LONG" && action === "SELL") {
     return { valid: false, error: "SELL signals are disabled (ALLOWED_DIRECTIONS=LONG)" };
   }
@@ -97,8 +99,8 @@ export function validatePayload(
 
   // Calculate SL and TP from entry price
   const price = body.price as number;
-  const slPct = CONFIG.STOP_LOSS_PCT / 100;
-  const tpPct = CONFIG.TAKE_PROFIT_PCT / 100;
+  const slPct = (tradingConfig?.STOP_LOSS_PCT ?? CONFIG.STOP_LOSS_PCT) / 100;
+  const tpPct = (tradingConfig?.TAKE_PROFIT_PCT ?? CONFIG.TAKE_PROFIT_PCT) / 100;
 
   // Determine decimal precision from the price itself (e.g. 0.046 → 3 decimals, 212.45 → 2)
   const priceStr = price.toString();
@@ -165,8 +167,18 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     details: { ip: req.ip, strategy: req.body?.strategy, symbol: req.body?.symbol },
   });
 
+  // Load user-configurable trading settings from Firestore
+  let tradingConfig: TradingConfig;
+  try {
+    tradingConfig = await getTradingConfig();
+  } catch (err) {
+    logger.error("[WEBHOOK] Failed to load trading config", err);
+    res.status(500).json({ error: "Failed to load trading config" });
+    return;
+  }
+
   // Validate payload
-  const validation = validatePayload(req.body || {});
+  const validation = validatePayload(req.body || {}, tradingConfig);
   if (!validation.valid) {
     logger.warn("[WEBHOOK] Invalid payload", { error: validation.error });
 
@@ -202,7 +214,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   }
 
   // Pyramid check: query Alpaca for an actual open position on this symbol
-  if (!CONFIG.ORDER_PYRAMID && payload.action === "BUY") {
+  if (!tradingConfig.ORDER_PYRAMID && payload.action === "BUY") {
     try {
       const alpacaConfig = getAlpacaConfig();
       const isCrypto = payload.symbol.endsWith("USD") || payload.symbol.endsWith("USDT") || payload.symbol.includes("/");
@@ -268,7 +280,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   logger.info("[WEBHOOK] Signal created", { signalId: docRef.id, symbol: payload.symbol });
 
   // Auto-approve: skip manual approval and execute immediately
-  if (CONFIG.AUTO_APPROVE) {
+  if (tradingConfig.AUTO_APPROVE) {
     logger.info("[WEBHOOK] Auto-approve enabled — executing order", { signalId: docRef.id });
 
     try {
