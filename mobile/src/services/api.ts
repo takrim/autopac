@@ -179,6 +179,34 @@ export async function fetchPortfolioHistory(
   return data.history;
 }
 
+// --- Trading Config ---
+
+export interface TradingConfig {
+  AUTO_APPROVE: boolean;
+  PAPER_TRADING: boolean;
+  ACTIVE_BROKER: "mock" | "alpaca";
+  TRADE_VALUE_USD: number;
+  STOP_LOSS_PCT: number;
+  TAKE_PROFIT_PCT: number;
+  SIMULATED_FEE_RATE: number;
+  ALLOWED_DIRECTIONS: "BOTH" | "LONG" | "SHORT";
+  ORDER_PYRAMID: boolean;
+  MAX_DAILY_TRADES: number;
+}
+
+export async function fetchConfig(): Promise<TradingConfig> {
+  const data = await apiRequest<{ config: TradingConfig }>("/config");
+  return data.config;
+}
+
+export async function updateConfig(updates: Partial<TradingConfig>): Promise<TradingConfig> {
+  const data = await apiRequest<{ config: TradingConfig }>("/config", {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
+  return data.config;
+}
+
 // --- FCM Token ---
 
 export async function registerFcmToken(token: string): Promise<void> {

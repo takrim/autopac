@@ -25,6 +25,7 @@ import {
   handleGetPortfolioHistory,
   handleLiquidatePosition,
 } from "./api/alpaca";
+import { handleGetConfig, handleUpdateConfig } from "./api/config";
 
 // --- Webhook App (no auth — uses shared secret) ---
 const webhookApp = express();
@@ -52,6 +53,8 @@ apiApp.get("/account", handleGetAccount);
 apiApp.get("/positions", handleGetPositions);
 apiApp.delete("/positions/:symbol", handleLiquidatePosition);
 apiApp.get("/portfolio-history", handleGetPortfolioHistory);
+apiApp.get("/config", handleGetConfig);
+apiApp.patch("/config", handleUpdateConfig);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.

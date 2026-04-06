@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { logger } from "firebase-functions/v2";
-import { CONFIG, getAlpacaConfig } from "../config";
+import { getAlpacaConfig } from "../config";
+import { getTradingConfig } from "./config";
 
 function getHeaders() {
   const config = getAlpacaConfig();
@@ -81,7 +82,8 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
     }
 
     const positions = (await resp.json()) as Array<Record<string, unknown>>;
-    const feeRate = CONFIG.SIMULATED_FEE_RATE;
+    const tradingConfig = await getTradingConfig();
+    const feeRate = tradingConfig.SIMULATED_FEE_RATE;
 
     const mapped = positions.map((p) => {
       const qty = parseFloat(p.qty as string);

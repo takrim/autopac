@@ -8,29 +8,65 @@ import {
   ScrollView,
   Switch,
   ActivityIndicator,
+  TextInput,
 } from "react-native";
 import * as Notifications from "expo-notifications";
 import { signOut } from "../services/auth";
 import { useAuth } from "../context/AuthContext";
-import { fetchAccount, AlpacaAccount } from "../services/api";
+import { fetchAccount, AlpacaAccount, fetchConfig, updateConfig, TradingConfig } from "../services/api";
 
 export default function SettingsScreen() {
   const { user } = useAuth();
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [account, setAccount] = useState<AlpacaAccount | null>(null);
   const [accountLoading, setAccountLoading] = useState(true);
+  const [config, setConfig] = useState<TradingConfig | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    // Check notification permission status
     Notifications.getPermissionsAsync().then(({ status }) => {
       setNotificationsEnabled(status === "granted");
     });
-    // Load account to check broker connection
     fetchAccount()
       .then(setAccount)
       .catch(() => setAccount(null))
       .finally(() => setAccountLoading(false));
+    fetchConfig()
+      .then(setConfig)
+      .catch(() => setConfig(null))
+      .finally(() => setConfigLoading(false));
   }, []);
+
+  const saveConfig = async (updates: Partial<TradingConfig>) => {
+    if (!config) return;
+    setSaving(true);
+    try {
+      const updated = await updateConfig(updates);
+      setConfig(updated);
+    } catch (err: any) {
+      Alert.alert("Error", err.message || "Failed to save config");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleNumberEdit = (key: keyof TradingConfig, label: string, current: number, min: number, max: number, decimals = 0) => {
+    Alert.prompt(
+      `Set ${label}`,
+      `Enter a value between ${min} and ${max}`,
+      (value) => {
+        const num = parseFloat(value);
+        if (isNaN(num) || num < min || num > max) {
+          Alert.alert("Invalid", `Must be between ${min} and ${max}`);
+          return;
+        }
+        saveConfig({ [key]: parseFloat(num.toFixed(decimals > 0 ? decimals : 0)) });
+      },
+      "plain-text",
+      String(current)
+    );
+  };
 
   const handleNotificationToggle = async () => {
     if (!notificationsEnabled) {
@@ -135,6 +171,135 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      {/* Trading Config */}
+      <Text style={styles.sectionHeader}>TRADING CONFIG {saving && <ActivityIndicator size="small" color="#e94560" />}</Text>
+      {configLoading ? (
+        <View style={[styles.section, { paddingVertical: 20, alignItems: "center" }]}>
+          <ActivityIndicator color="#e94560" />
+        </View>
+      ) : config ? (
+        <>
+          <View style={styles.section}>
+            <View style={styles.row}>
+              <View style={styles.labelGroup}>
+                <Text style={styles.label}>Auto Approve</Text>
+                <Text style={styles.hint}>Execute signals without manual review</Text>
+              </View>
+              <Switch
+                value={config.AUTO_APPROVE}
+                onValueChange={(v) => saveConfig({ AUTO_APPROVE: v })}
+                trackColor={{ false: "#333", true: "#0f3460" }}
+                thumbColor={config.AUTO_APPROVE ? "#e94560" : "#666"}
+                disabled={saving}
+              />
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.row}>
+              <View style={styles.labelGroup}>
+                <Text style={styles.label}>Order Pyramiding</Text>
+                <Text style={styles.hint}>Allow multiple buys on same symbol</Text>
+              </View>
+              <Switch
+                value={config.ORDER_PYRAMID}
+                onValueChange={(v) => saveConfig({ ORDER_PYRAMID: v })}
+                trackColor={{ false: "#333", true: "#0f3460" }}
+                thumbColor={config.ORDER_PYRAMID ? "#e94560" : "#666"}
+                disabled={saving}
+              />
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("TRADE_VALUE_USD", "Trade Value (USD)", config.TRADE_VALUE_USD, 1, 100000)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Trade Value</Text>
+              <Text style={styles.valueEdit}>${config.TRADE_VALUE_USD.toLocaleString()}</Text>
+            </TouchableOpacity>
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("STOP_LOSS_PCT", "Stop Loss %", config.STOP_LOSS_PCT, 0.1, 50, 2)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Stop Loss</Text>
+              <Text style={styles.valueEdit}>{config.STOP_LOSS_PCT}%</Text>
+            </TouchableOpacity>
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("TAKE_PROFIT_PCT", "Take Profit %", config.TAKE_PROFIT_PCT, 0.1, 100, 2)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Take Profit</Text>
+              <Text style={styles.valueEdit}>{config.TAKE_PROFIT_PCT}%</Text>
+            </TouchableOpacity>
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("MAX_DAILY_TRADES", "Max Daily Trades", config.MAX_DAILY_TRADES, 1, 500)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Max Daily Trades</Text>
+              <Text style={styles.valueEdit}>{config.MAX_DAILY_TRADES}</Text>
+            </TouchableOpacity>
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("SIMULATED_FEE_RATE", "Fee Rate (e.g. 0.006 = 0.6%)", config.SIMULATED_FEE_RATE, 0, 0.1, 4)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Simulated Fee Rate</Text>
+              <Text style={styles.valueEdit}>{(config.SIMULATED_FEE_RATE * 100).toFixed(2)}%</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.section}>
+            <View style={styles.row}>
+              <Text style={styles.label}>Trade Direction</Text>
+              <View style={styles.segmentGroup}>
+                {(["LONG", "SHORT", "BOTH"] as const).map((d) => (
+                  <TouchableOpacity
+                    key={d}
+                    style={[styles.segment, config.ALLOWED_DIRECTIONS === d && styles.segmentActive]}
+                    onPress={() => saveConfig({ ALLOWED_DIRECTIONS: d })}
+                    disabled={saving}
+                  >
+                    <Text style={[styles.segmentText, config.ALLOWED_DIRECTIONS === d && styles.segmentTextActive]}>
+                      {d}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.row}>
+              <Text style={styles.label}>Broker</Text>
+              <View style={styles.segmentGroup}>
+                {(["alpaca", "mock"] as const).map((b) => (
+                  <TouchableOpacity
+                    key={b}
+                    style={[styles.segment, config.ACTIVE_BROKER === b && styles.segmentActive]}
+                    onPress={() => saveConfig({ ACTIVE_BROKER: b })}
+                    disabled={saving}
+                  >
+                    <Text style={[styles.segmentText, config.ACTIVE_BROKER === b && styles.segmentTextActive]}>
+                      {b.toUpperCase()}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </View>
+        </>
+      ) : (
+        <View style={[styles.section, { padding: 16 }]}>
+          <Text style={{ color: "#d9534f" }}>Failed to load config</Text>
+        </View>
+      )}
+
       {/* Actions */}
       <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
         <Text style={styles.signOutText}>Sign Out</Text>
@@ -211,6 +376,44 @@ const styles = StyleSheet.create({
     color: "#5cb85c",
     fontSize: 12,
     fontWeight: "bold",
+  },
+  labelGroup: {
+    flex: 1,
+    marginRight: 12,
+  },
+  hint: {
+    color: "#555",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  valueEdit: {
+    color: "#e94560",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  segmentGroup: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  segment: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: "#0f3460",
+    borderWidth: 1,
+    borderColor: "#0f3460",
+  },
+  segmentActive: {
+    backgroundColor: "#e94560",
+    borderColor: "#e94560",
+  },
+  segmentText: {
+    color: "#888",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  segmentTextActive: {
+    color: "#fff",
   },
   signOutButton: {
     backgroundColor: "#d9534f",
