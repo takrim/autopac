@@ -9,7 +9,7 @@ initializeApp();
 
 import { requireAuth } from "./middleware/auth";
 import { webhookRateLimiter } from "./middleware/rateLimit";
-import { handleWebhook, handleRsiWebhook } from "./webhooks/tradingview";
+import { handleWebhook, handleRsiWebhook, handleVwapWebhook } from "./webhooks/tradingview";
 import { handleTradeApproval } from "./api/trade";
 import {
   handleListSignals,
@@ -34,6 +34,7 @@ webhookApp.use(express.json({ limit: "10kb" }));
 webhookApp.use(webhookRateLimiter);
 
 webhookApp.post("/tradingview/rsi", handleRsiWebhook);
+webhookApp.post("/tradingview/vwap", handleVwapWebhook);
 webhookApp.post("/tradingview", handleWebhook);
 
 // --- API App (authenticated) ---

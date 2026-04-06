@@ -27,6 +27,9 @@ export interface Signal {
   rsiConfidence?: string;
   rsiPrice?: number;
   rsiUpdatedAt?: Timestamp | FieldValue;
+  vwapTrend?: string;
+  vwapPrice?: number;
+  vwapUpdatedAt?: Timestamp | FieldValue;
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 }

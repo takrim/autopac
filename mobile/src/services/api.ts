@@ -51,6 +51,8 @@ export interface Signal {
   rsiTrend?: string;
   rsiConfidence?: string;
   rsiPrice?: number;
+  vwapTrend?: string;
+  vwapPrice?: number;
   createdAt: any;
 }
 

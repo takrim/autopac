@@ -155,6 +155,17 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           }
         />
         <DetailRow
+          label="VWAP Trend"
+          value={signal.vwapTrend || "Awaiting…"}
+          valueColor={
+            signal.vwapTrend === "bullish"
+              ? "#5cb85c"
+              : signal.vwapTrend === "bearish"
+                ? "#d9534f"
+                : "#666"
+          }
+        />
+        <DetailRow
           label="Signal Time"
           value={new Date(signal.signalTime).toLocaleString()}
         />

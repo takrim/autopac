@@ -46,6 +46,15 @@ export default function SignalCard({ signal, onPress }: Props) {
               </Text>
             </View>
           )}
+          {signal.vwapTrend && (
+            <View style={[styles.rsiBadge, {
+              backgroundColor: signal.vwapTrend === "bullish" ? "#5cb85c" : signal.vwapTrend === "bearish" ? "#d9534f" : "#0f3460",
+            }]}>
+              <Text style={styles.rsiText}>
+                {signal.vwapTrend === "bullish" ? "▲" : signal.vwapTrend === "bearish" ? "▼" : "—"} VWAP
+              </Text>
+            </View>
+          )}
         </View>
       </View>
 
