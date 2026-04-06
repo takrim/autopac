@@ -115,16 +115,17 @@ export class AlpacaBroker implements IBroker {
       orderBody.limit_price = params.limitPrice.toString();
     }
 
-    // For stocks: use bracket orders for SL/TP (only when qty is whole shares)
-    if (!isCrypto && orderBody.qty) {
-      if (params.stopLoss && params.takeProfit) {
-        orderBody.order_class = "bracket";
-        orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
-        orderBody.take_profit = { limit_price: params.takeProfit.toString() };
-      } else if (params.stopLoss) {
-        orderBody.order_class = "oto";
-        orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
-      }
+    // For stocks: try bracket orders for SL/TP (only when qty is whole shares)
+    let useBracket = false;
+    if (!isCrypto && orderBody.qty && params.stopLoss && params.takeProfit) {
+      orderBody.order_class = "bracket";
+      orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
+      orderBody.take_profit = { limit_price: params.takeProfit.toString() };
+      useBracket = true;
+    } else if (!isCrypto && orderBody.qty && params.stopLoss) {
+      orderBody.order_class = "oto";
+      orderBody.stop_loss = { stop_price: params.stopLoss.toString() };
+      useBracket = true;
     }
 
     try {
@@ -143,9 +144,21 @@ export class AlpacaBroker implements IBroker {
         logger.info("[ALPACA] Existing position found, keeping open orders", { symbol });
       }
 
-      logger.info("[ALPACA] Placing order", { symbol, side: params.side, isCrypto });
+      logger.info("[ALPACA] Placing order", { symbol, side: params.side, isCrypto, bracket: useBracket });
 
-      const { ok, data } = await this.submitOrder(orderBody);
+      let { ok, data } = await this.submitOrder(orderBody);
+
+      // If bracket order failed, retry as a simple order without SL/TP
+      if (!ok && useBracket) {
+        const errMsg = String(data.message || "");
+        logger.warn("[ALPACA] Bracket order failed, retrying as simple order", { symbol, error: errMsg });
+        delete orderBody.order_class;
+        delete orderBody.stop_loss;
+        delete orderBody.take_profit;
+        const retry = await this.submitOrder(orderBody);
+        ok = retry.ok;
+        data = retry.data;
+      }
 
       if (!ok) {
         logger.error("[ALPACA] Order failed", { data });
