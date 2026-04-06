@@ -144,6 +144,17 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           value={signal.takeProfit ? `$${signal.takeProfit.toFixed(2)}` : "—"}
         />
         <DetailRow
+          label="RSI Trend"
+          value={signal.rsiTrend ? `${signal.rsiTrend} (${signal.rsiConfidence || "?"})` : "Awaiting…"}
+          valueColor={
+            signal.rsiTrend === "bullish"
+              ? "#5cb85c"
+              : signal.rsiTrend === "bearish"
+                ? "#d9534f"
+                : "#666"
+          }
+        />
+        <DetailRow
           label="Signal Time"
           value={new Date(signal.signalTime).toLocaleString()}
         />
@@ -177,11 +188,11 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+function DetailRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <View style={styles.detailRow}>
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={styles.detailValue}>{value}</Text>
+      <Text style={[styles.detailValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
     </View>
   );
 }

@@ -295,3 +295,96 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 
   res.status(201).json({ status: "created", signalId: docRef.id });
 }
+/**
+ * POST /tradingview/rsi — Receive RSI trend signals from TradingView.
+ *
+ * Only accepts and stores the RSI data if there is a PENDING signal for the symbol.
+ * Otherwise the update is rejected — we don't store stale/orphan indicator data.
+ *
+ * Expected payload:
+ *   { "symbol": "ETHUSD", "price": 2100.50, "rsitrend": "bullish", "confidence": "early", "secret": "..." }
+ */
+export async function handleRsiWebhook(req: Request, res: Response): Promise<void> {
+  logger.info("[RSI] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
+
+  const body = req.body || {};
+
+  // --- Validate secret ---
+  const secret = String(body.secret || "");
+  let webhookSecret: string;
+  try {
+    webhookSecret = getWebhookSecret();
+  } catch {
+    logger.error("[RSI] Missing WEBHOOK_SECRET");
+    res.status(500).json({ error: "Server configuration error" });
+    return;
+  }
+
+  const secretBuf = Buffer.from(secret);
+  const expectedBuf = Buffer.from(webhookSecret);
+  if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
+    logger.warn("[RSI] Invalid secret");
+    res.status(401).json({ error: "Invalid secret" });
+    return;
+  }
+
+  // --- Validate payload ---
+  const symbol = String(body.symbol || "").toUpperCase().trim();
+  const rsitrend = String(body.rsitrend || "").toLowerCase().trim();
+  const confidence = String(body.confidence || "").toLowerCase().trim();
+  const price = parseFloat(body.price);
+
+  if (!symbol) {
+    res.status(400).json({ error: "Missing symbol" });
+    return;
+  }
+
+  const validTrends = ["bullish", "bearish", "neutral"];
+  if (!rsitrend || !validTrends.includes(rsitrend)) {
+    res.status(400).json({ error: `Invalid rsitrend — must be one of: ${validTrends.join(", ")}` });
+    return;
+  }
+
+  const validConfidences = ["early", "confirmed", "strong"];
+  if (!confidence || !validConfidences.includes(confidence)) {
+    res.status(400).json({ error: `Invalid confidence — must be one of: ${validConfidences.join(", ")}` });
+    return;
+  }
+
+  try {
+    // --- Find the most recent PENDING signal for this symbol ---
+    const pendingSnap = await db
+      .collection("signals")
+      .where("symbol", "==", symbol)
+      .where("status", "==", "PENDING")
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    if (pendingSnap.empty) {
+      logger.info("[RSI] No pending signal for symbol — rejecting", { symbol, rsitrend, confidence });
+      res.status(404).json({ error: `No pending signal for ${symbol}`, rsitrend, confidence });
+      return;
+    }
+
+    // --- Update the pending signal with RSI trend data ---
+    const signalDoc = pendingSnap.docs[0];
+    const update: Record<string, unknown> = {
+      rsiTrend: rsitrend,
+      rsiConfidence: confidence,
+      rsiUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (!isNaN(price) && price > 0) {
+      update.rsiPrice = price;
+    }
+
+    await signalDoc.ref.update(update);
+
+    logger.info("[RSI] Updated pending signal", { signalId: signalDoc.id, symbol, rsitrend, confidence, price });
+    res.json({ status: "accepted", signalId: signalDoc.id, symbol, rsitrend, confidence });
+  } catch (err) {
+    logger.error("[RSI] Error processing RSI webhook", { symbol, rsitrend, confidence, err: String(err) });
+    res.status(500).json({ error: "Internal server error" });
+  }
+}

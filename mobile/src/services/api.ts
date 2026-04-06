@@ -48,6 +48,9 @@ export interface Signal {
   signalTime: string;
   status: "PENDING" | "APPROVED" | "REJECTED" | "EXECUTED" | "FAILED";
   statusMessage?: string;
+  rsiTrend?: string;
+  rsiConfidence?: string;
+  rsiPrice?: number;
   createdAt: any;
 }
 

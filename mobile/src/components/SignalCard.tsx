@@ -35,7 +35,18 @@ export default function SignalCard({ signal, onPress }: Props) {
 
       <View style={styles.details}>
         <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
-        <Text style={styles.strategy}>{signal.strategy}</Text>
+        <View style={styles.indicatorRow}>
+          <Text style={styles.strategy}>{signal.strategy}</Text>
+          {signal.rsiTrend && (
+            <View style={[styles.rsiBadge, {
+              backgroundColor: signal.rsiTrend === "bullish" ? "#5cb85c" : signal.rsiTrend === "bearish" ? "#d9534f" : "#0f3460",
+            }]}>
+              <Text style={styles.rsiText}>
+                {signal.rsiTrend === "bullish" ? "▲" : signal.rsiTrend === "bearish" ? "▼" : "—"} RSI {signal.rsiConfidence || ""}
+              </Text>
+            </View>
+          )}
+        </View>
       </View>
 
       <View style={styles.footer}>
@@ -97,9 +108,24 @@ const styles = StyleSheet.create({
     color: "#ddd",
     fontSize: 16,
   },
+  indicatorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   strategy: {
     color: "#888",
     fontSize: 14,
+  },
+  rsiBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  rsiText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
   },
   footer: {
     flexDirection: "row",

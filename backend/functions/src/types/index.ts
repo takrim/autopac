@@ -21,7 +21,12 @@ export interface Signal {
   takeProfit: number;
   signalTime: string;
   status: SignalStatus;
+  statusMessage?: string;
   idempotencyKey: string;
+  rsiTrend?: string;
+  rsiConfidence?: string;
+  rsiPrice?: number;
+  rsiUpdatedAt?: Timestamp | FieldValue;
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 }
