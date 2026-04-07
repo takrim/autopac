@@ -249,6 +249,30 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     }
   }
 
+  // Reject all existing PENDING signals for this symbol (superseded by new signal)
+  try {
+    const pendingSnap = await db
+      .collection("signals")
+      .where("symbol", "==", payload.symbol)
+      .where("status", "==", "PENDING")
+      .get();
+
+    if (!pendingSnap.empty) {
+      const batch = db.batch();
+      for (const doc of pendingSnap.docs) {
+        batch.update(doc.ref, {
+          status: "REJECTED",
+          statusMessage: "Superseded by new signal",
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      logger.info("[WEBHOOK] Rejected stale pending signals", { symbol: payload.symbol, count: pendingSnap.size });
+    }
+  } catch (err) {
+    logger.warn("[WEBHOOK] Failed to reject stale signals (non-fatal)", { err: String(err) });
+  }
+
   // Store signal
   const signal: Signal = {
     strategy: payload.strategy,
