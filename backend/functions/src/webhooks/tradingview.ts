@@ -252,12 +252,28 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   // Delete all signals older than 1 hour for this symbol (PENDING + REJECTED) and old bulltrends
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
   try {
-    // Delete stale signals (PENDING/REJECTED)
-    const staleSignals = await db
+    // Delete all signals for this symbol older than 1 hour (any status) + all current PENDING/REJECTED
+    const oldSignals = await db
+      .collection("signals")
+      .where("symbol", "==", payload.symbol)
+      .where("createdAt", "<=", oneHourAgo)
+      .get();
+
+    const stalePending = await db
       .collection("signals")
       .where("symbol", "==", payload.symbol)
       .where("status", "in", ["PENDING", "REJECTED"])
       .get();
+
+    // Merge and deduplicate
+    const deleteIds = new Set<string>();
+    const staleSignalDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    for (const doc of [...oldSignals.docs, ...stalePending.docs]) {
+      if (!deleteIds.has(doc.id)) {
+        deleteIds.add(doc.id);
+        staleSignalDocs.push(doc);
+      }
+    }
 
     // Delete old bulltrends for this symbol (older than 1 hour)
     const staleBulltrends = await db
@@ -266,13 +282,13 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
       .where("createdAt", "<=", oneHourAgo)
       .get();
 
-    const totalDelete = staleSignals.size + staleBulltrends.size;
+    const totalDelete = staleSignalDocs.length + staleBulltrends.size;
     if (totalDelete > 0) {
       const batch = db.batch();
-      for (const doc of staleSignals.docs) batch.delete(doc.ref);
+      for (const doc of staleSignalDocs) batch.delete(doc.ref);
       for (const doc of staleBulltrends.docs) batch.delete(doc.ref);
       await batch.commit();
-      logger.info("[WEBHOOK] Cleaned up stale data", { symbol: payload.symbol, signals: staleSignals.size, bulltrends: staleBulltrends.size });
+      logger.info("[WEBHOOK] Cleaned up stale data", { symbol: payload.symbol, signals: staleSignalDocs.length, bulltrends: staleBulltrends.size });
     }
   } catch (err) {
     logger.warn("[WEBHOOK] Failed to clean up stale data (non-fatal)", { err: String(err) });
