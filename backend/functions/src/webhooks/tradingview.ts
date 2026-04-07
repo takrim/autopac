@@ -260,14 +260,10 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     if (!pendingSnap.empty) {
       const batch = db.batch();
       for (const doc of pendingSnap.docs) {
-        batch.update(doc.ref, {
-          status: "REJECTED",
-          statusMessage: "Superseded by new signal",
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+        batch.delete(doc.ref);
       }
       await batch.commit();
-      logger.info("[WEBHOOK] Rejected stale pending signals", { symbol: payload.symbol, count: pendingSnap.size });
+      logger.info("[WEBHOOK] Deleted stale pending signals", { symbol: payload.symbol, count: pendingSnap.size });
     }
   } catch (err) {
     logger.warn("[WEBHOOK] Failed to reject stale signals (non-fatal)", { err: String(err) });
