@@ -144,6 +144,11 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           value={signal.takeProfit ? `$${signal.takeProfit.toFixed(2)}` : "—"}
         />
         <DetailRow
+          label="Bull Trend"
+          value={signal.bullishTrend != null ? (signal.bullishTrend ? "Bullish ▲" : "Bearish ▼") : "Awaiting…"}
+          valueColor={signal.bullishTrend === true ? "#5cb85c" : signal.bullishTrend === false ? "#d9534f" : "#666"}
+        />
+        <DetailRow
           label="RSI (14)"
           value={signal.rsi != null ? `${signal.rsi.toFixed(1)} — ${signal.rsiTrend || ""}` : "Calculating…"}
           valueColor={
@@ -167,6 +172,9 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
                 : "#666"
           }
         />
+        {signal.bulltrendVolume != null && (
+          <DetailRow label="Volume" value={signal.bulltrendVolume.toLocaleString()} />
+        )}
         <DetailRow
           label="Signal Time"
           value={new Date(signal.signalTime).toLocaleString()}

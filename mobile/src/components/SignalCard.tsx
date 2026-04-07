@@ -37,6 +37,13 @@ export default function SignalCard({ signal, onPress }: Props) {
         <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
         <View style={styles.indicatorRow}>
           <Text style={styles.strategy}>{signal.strategy}</Text>
+          {signal.bullishTrend != null && (
+            <View style={[styles.rsiBadge, {
+              backgroundColor: signal.bullishTrend ? "#5cb85c" : "#d9534f",
+            }]}>
+              <Text style={styles.rsiText}>{signal.bullishTrend ? "▲ Bull" : "▼ Bear"}</Text>
+            </View>
+          )}
           {signal.rsi != null && (
             <View style={[styles.rsiBadge, {
               backgroundColor: signal.rsi < 30 ? "#5cb85c" : signal.rsi > 70 ? "#d9534f" : "#0f3460",
@@ -48,9 +55,7 @@ export default function SignalCard({ signal, onPress }: Props) {
             <View style={[styles.rsiBadge, {
               backgroundColor: signal.vwapTrend === "bullish" ? "#5cb85c" : signal.vwapTrend === "bearish" ? "#d9534f" : "#0f3460",
             }]}>
-              <Text style={styles.rsiText}>
-                {signal.vwapTrend === "bullish" ? "▲ Above" : signal.vwapTrend === "bearish" ? "▼ Below" : "= At"} VWAP
-              </Text>
+              <Text style={styles.rsiText}>VWAP</Text>
             </View>
           )}
         </View>

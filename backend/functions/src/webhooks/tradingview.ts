@@ -341,16 +341,15 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   res.status(201).json({ status: "created", signalId: docRef.id });
 }
 /**
- * POST /tradingview/rsi — Receive RSI trend signals from TradingView.
+ * POST /tradingview/bulltrend — Receive bull trend confirmation from TradingView.
  *
- * Only accepts and stores the RSI data if there is a PENDING signal for the symbol.
- * Otherwise the update is rejected — we don't store stale/orphan indicator data.
+ * Only accepts if there is a PENDING signal for the symbol.
  *
  * Expected payload:
- *   { "symbol": "ETHUSD", "price": 2100.50, "rsitrend": "bullish", "confidence": "early", "secret": "..." }
+ *   { "bullish_trend": "true", "symbol": "ETHUSD", "price": "2100.50", "volume": "1234567", "time": "2026-04-06T12:00:00Z", "secret": "..." }
  */
-export async function handleRsiWebhook(req: Request, res: Response): Promise<void> {
-  logger.info("[RSI] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
+export async function handleBulltrendWebhook(req: Request, res: Response): Promise<void> {
+  logger.info("[BULLTREND] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
 
   const body = req.body || {};
 
@@ -360,7 +359,7 @@ export async function handleRsiWebhook(req: Request, res: Response): Promise<voi
   try {
     webhookSecret = getWebhookSecret();
   } catch {
-    logger.error("[RSI] Missing WEBHOOK_SECRET");
+    logger.error("[BULLTREND] Missing WEBHOOK_SECRET");
     res.status(500).json({ error: "Server configuration error" });
     return;
   }
@@ -368,31 +367,20 @@ export async function handleRsiWebhook(req: Request, res: Response): Promise<voi
   const secretBuf = Buffer.from(secret);
   const expectedBuf = Buffer.from(webhookSecret);
   if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
-    logger.warn("[RSI] Invalid secret");
+    logger.warn("[BULLTREND] Invalid secret");
     res.status(401).json({ error: "Invalid secret" });
     return;
   }
 
   // --- Validate payload ---
   const symbol = String(body.symbol || "").toUpperCase().trim();
-  const rsitrend = String(body.rsitrend || "").toLowerCase().trim();
-  const confidence = String(body.confidence || "").toLowerCase().trim();
+  const bullishTrend = String(body.bullish_trend || "").toLowerCase().trim() === "true";
   const price = parseFloat(body.price);
+  const volume = parseFloat(body.volume);
+  const time = String(body.time || "");
 
   if (!symbol) {
     res.status(400).json({ error: "Missing symbol" });
-    return;
-  }
-
-  const validTrends = ["bullish", "bearish", "neutral"];
-  if (!rsitrend || !validTrends.includes(rsitrend)) {
-    res.status(400).json({ error: `Invalid rsitrend — must be one of: ${validTrends.join(", ")}` });
-    return;
-  }
-
-  const validConfidences = ["early", "confirmed", "strong"];
-  if (!confidence || !validConfidences.includes(confidence)) {
-    res.status(400).json({ error: `Invalid confidence — must be one of: ${validConfidences.join(", ")}` });
     return;
   }
 
@@ -407,112 +395,28 @@ export async function handleRsiWebhook(req: Request, res: Response): Promise<voi
       .get();
 
     if (pendingSnap.empty) {
-      logger.info("[RSI] No pending signal for symbol — rejecting", { symbol, rsitrend, confidence });
-      res.status(404).json({ error: `No pending signal for ${symbol}`, rsitrend, confidence });
+      logger.info("[BULLTREND] No pending signal for symbol — rejecting", { symbol, bullishTrend });
+      res.status(404).json({ error: `No pending signal for ${symbol}`, bullish_trend: bullishTrend });
       return;
     }
 
-    // --- Update the pending signal with RSI trend data ---
+    // --- Update the pending signal with bull trend data ---
     const signalDoc = pendingSnap.docs[0];
     const update: Record<string, unknown> = {
-      rsiTrend: rsitrend,
-      rsiConfidence: confidence,
-      rsiUpdatedAt: FieldValue.serverTimestamp(),
+      bullishTrend,
+      bulltrendUpdatedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     };
-    if (!isNaN(price) && price > 0) {
-      update.rsiPrice = price;
-    }
+    if (!isNaN(price) && price > 0) update.bulltrendPrice = price;
+    if (!isNaN(volume) && volume > 0) update.bulltrendVolume = volume;
+    if (time) update.bulltrendTime = time;
 
     await signalDoc.ref.update(update);
 
-    logger.info("[RSI] Updated pending signal", { signalId: signalDoc.id, symbol, rsitrend, confidence, price });
-    res.json({ status: "accepted", signalId: signalDoc.id, symbol, rsitrend, confidence });
+    logger.info("[BULLTREND] Updated pending signal", { signalId: signalDoc.id, symbol, bullishTrend, price, volume });
+    res.json({ status: "accepted", signalId: signalDoc.id, symbol, bullish_trend: bullishTrend });
   } catch (err) {
-    logger.error("[RSI] Error processing RSI webhook", { symbol, rsitrend, confidence, err: String(err) });
-    res.status(500).json({ error: "Internal server error" });
-  }
-}
-
-/**
- * POST /tradingview/vwap — Receive VWAP trend signals from TradingView.
- *
- * Only accepts if there is a PENDING signal for the symbol.
- *
- * Expected payload:
- *   { "symbol": "ETHUSD", "price": 2100.50, "vwaptrend": "bullish", "secret": "..." }
- */
-export async function handleVwapWebhook(req: Request, res: Response): Promise<void> {
-  logger.info("[VWAP] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
-
-  const body = req.body || {};
-
-  // --- Validate secret ---
-  const secret = String(body.secret || "");
-  let webhookSecret: string;
-  try {
-    webhookSecret = getWebhookSecret();
-  } catch {
-    logger.error("[VWAP] Missing WEBHOOK_SECRET");
-    res.status(500).json({ error: "Server configuration error" });
-    return;
-  }
-
-  const secretBuf = Buffer.from(secret);
-  const expectedBuf = Buffer.from(webhookSecret);
-  if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
-    logger.warn("[VWAP] Invalid secret");
-    res.status(401).json({ error: "Invalid secret" });
-    return;
-  }
-
-  // --- Validate payload ---
-  const symbol = String(body.symbol || "").toUpperCase().trim();
-  const vwaptrend = String(body.vwaptrend || "").toLowerCase().trim();
-  const price = parseFloat(body.price);
-
-  if (!symbol) {
-    res.status(400).json({ error: "Missing symbol" });
-    return;
-  }
-
-  const validTrends = ["bullish", "bearish", "neutral"];
-  if (!vwaptrend || !validTrends.includes(vwaptrend)) {
-    res.status(400).json({ error: `Invalid vwaptrend — must be one of: ${validTrends.join(", ")}` });
-    return;
-  }
-
-  try {
-    const pendingSnap = await db
-      .collection("signals")
-      .where("symbol", "==", symbol)
-      .where("status", "==", "PENDING")
-      .orderBy("createdAt", "desc")
-      .limit(1)
-      .get();
-
-    if (pendingSnap.empty) {
-      logger.info("[VWAP] No pending signal for symbol — rejecting", { symbol, vwaptrend });
-      res.status(404).json({ error: `No pending signal for ${symbol}`, vwaptrend });
-      return;
-    }
-
-    const signalDoc = pendingSnap.docs[0];
-    const update: Record<string, unknown> = {
-      vwapTrend: vwaptrend,
-      vwapUpdatedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    };
-    if (!isNaN(price) && price > 0) {
-      update.vwapPrice = price;
-    }
-
-    await signalDoc.ref.update(update);
-
-    logger.info("[VWAP] Updated pending signal", { signalId: signalDoc.id, symbol, vwaptrend, price });
-    res.json({ status: "accepted", signalId: signalDoc.id, symbol, vwaptrend });
-  } catch (err) {
-    logger.error("[VWAP] Error processing VWAP webhook", { symbol, vwaptrend, err: String(err) });
+    logger.error("[BULLTREND] Error processing webhook", { symbol, bullishTrend, err: String(err) });
     res.status(500).json({ error: "Internal server error" });
   }
 }

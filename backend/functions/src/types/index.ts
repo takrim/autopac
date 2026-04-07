@@ -23,13 +23,15 @@ export interface Signal {
   status: SignalStatus;
   statusMessage?: string;
   idempotencyKey: string;
+  rsi?: number;
   rsiTrend?: string;
   rsiConfidence?: string;
-  rsiPrice?: number;
-  rsiUpdatedAt?: Timestamp | FieldValue;
   vwapTrend?: string;
   vwapPrice?: number;
-  vwapUpdatedAt?: Timestamp | FieldValue;
+  bullishTrend?: boolean;
+  bulltrendPrice?: number;
+  bulltrendVolume?: number;
+  bulltrendTime?: string;
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 }
