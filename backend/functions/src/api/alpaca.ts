@@ -189,26 +189,72 @@ export async function handleLiquidatePosition(req: Request, res: Response): Prom
       logger.warn("[API] Error cancelling orders for symbol", { symbol, err: String(cancelErr) });
     }
 
-    // 2. Liquidate the position
+    // 2. Fetch current position to get qty, price, and asset class
     const posSymbol = encodeURIComponent(symbol);
-    const closeResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, {
-      method: "DELETE",
-      headers,
-    });
-
-    if (!closeResp.ok) {
-      let errMsg = await closeResp.text();
-      try {
-        const errJson = JSON.parse(errMsg);
-        if (errJson && errJson.message) errMsg = errJson.message;
-      } catch {}
-      errMsg = (errMsg || "Unknown error").toString().trim();
-      logger.error("[API] Alpaca position liquidation failed", { symbol, status: closeResp.status, err: errMsg });
-      res.status(502).json({ error: `Failed to liquidate ${symbol}: ${errMsg}` });
+    const posResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, { headers });
+    if (!posResp.ok) {
+      res.status(404).json({ error: `Position not found for ${symbol}` });
       return;
     }
+    const position = (await posResp.json()) as Record<string, string>;
+    const isCrypto = (position.asset_class || "").toLowerCase() === "crypto";
 
-    const closeData = (await closeResp.json()) as Record<string, unknown>;
+    // Check if market is open for stocks
+    const isMarketOpen = (() => {
+      const now = new Date();
+      const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay();
+      if (day === 0 || day === 6) return false;
+      const mins = et.getHours() * 60 + et.getMinutes();
+      return mins >= 570 && mins < 960; // 9:30–16:00 ET
+    })();
+
+    let closeData: Record<string, unknown>;
+
+    if (!isCrypto && !isMarketOpen) {
+      // Extended hours: place a limit sell order at current price with buffer
+      const currentPrice = parseFloat(position.current_price || "0");
+      const limitPrice = (currentPrice * 0.98).toFixed(2); // 2% below to ensure fill
+      const orderResp = await fetch(`${config.baseUrl}/v2/orders`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol,
+          qty: position.qty,
+          side: "sell",
+          type: "limit",
+          limit_price: limitPrice,
+          time_in_force: "day",
+          extended_hours: true,
+        }),
+      });
+
+      if (!orderResp.ok) {
+        let errMsg = await orderResp.text();
+        try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
+        logger.error("[API] Extended hours liquidation failed", { symbol, err: errMsg });
+        res.status(502).json({ error: `Failed to liquidate ${symbol}: ${errMsg}` });
+        return;
+      }
+      closeData = (await orderResp.json()) as Record<string, unknown>;
+      logger.info("[API] Extended hours limit sell placed", { symbol, qty: position.qty, limitPrice });
+    } else {
+      // Market hours or crypto: use standard DELETE /positions endpoint
+      const closeResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, {
+        method: "DELETE",
+        headers,
+      });
+
+      if (!closeResp.ok) {
+        let errMsg = await closeResp.text();
+        try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
+        errMsg = (errMsg || "Unknown error").toString().trim();
+        logger.error("[API] Alpaca position liquidation failed", { symbol, status: closeResp.status, err: errMsg });
+        res.status(502).json({ error: `Failed to liquidate ${symbol}: ${errMsg}` });
+        return;
+      }
+      closeData = (await closeResp.json()) as Record<string, unknown>;
+    }
 
     logger.info("[API] Position liquidated", { symbol, cancelledOrders: cancelledCount });
     res.json({
