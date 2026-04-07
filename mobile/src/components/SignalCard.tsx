@@ -21,10 +21,15 @@ export default function SignalCard({ signal, onPress }: Props) {
 
   return (
     <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.7}>
+      {signal.strongBuy && (
+        <View style={styles.strongBuyBanner}>
+          <Text style={styles.strongBuyText}>⚡ STRONG BUY — Bull Trend Confirmed</Text>
+        </View>
+      )}
       <View style={styles.header}>
         <View style={styles.symbolRow}>
           <Text style={[styles.action, { color: actionColor }]}>
-            {signal.action}
+            {signal.strongBuy ? "STRONG BUY" : signal.action}
           </Text>
           <Text style={styles.symbol}>{signal.symbol}</Text>
         </View>
@@ -37,13 +42,6 @@ export default function SignalCard({ signal, onPress }: Props) {
         <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
         <View style={styles.indicatorRow}>
           <Text style={styles.strategy}>{signal.strategy}</Text>
-          {signal.bullishTrend != null && (
-            <View style={[styles.rsiBadge, {
-              backgroundColor: signal.bullishTrend ? "#5cb85c" : "#d9534f",
-            }]}>
-              <Text style={styles.rsiText}>{signal.bullishTrend ? "▲ Bull" : "▼ Bear"}</Text>
-            </View>
-          )}
           {signal.rsi != null && (
             <View style={[styles.rsiBadge, {
               backgroundColor: signal.rsi < 30 ? "#5cb85c" : signal.rsi > 70 ? "#d9534f" : "#0f3460",
@@ -72,6 +70,19 @@ export default function SignalCard({ signal, onPress }: Props) {
 }
 
 const styles = StyleSheet.create({
+  strongBuyBanner: {
+    backgroundColor: "#ff9800",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    marginBottom: 8,
+    alignSelf: "flex-start",
+  },
+  strongBuyText: {
+    color: "#000",
+    fontSize: 12,
+    fontWeight: "bold",
+  },
   card: {
     backgroundColor: "#16213e",
     borderRadius: 12,

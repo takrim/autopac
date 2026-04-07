@@ -290,6 +290,35 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 
   await logAudit("SIGNAL_VALIDATED", { signalId: docRef.id });
 
+  // Check for recent bulltrend signal within 9 minutes → Strong Buy
+  if (payload.action === "BUY") {
+    try {
+      const cutoff = new Date(Date.now() - 9 * 60 * 1000);
+      const bulltrendSnap = await db
+        .collection("bulltrends")
+        .where("symbol", "==", payload.symbol)
+        .where("bullishTrend", "==", true)
+        .where("createdAt", ">=", cutoff)
+        .orderBy("createdAt", "desc")
+        .limit(1)
+        .get();
+
+      if (!bulltrendSnap.empty) {
+        const bt = bulltrendSnap.docs[0].data();
+        await docRef.update({
+          strongBuy: true,
+          bullishTrend: true,
+          bulltrendPrice: bt.price || null,
+          bulltrendVolume: bt.volume || null,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        logger.info("[WEBHOOK] Recent bulltrend found → Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
+      }
+    } catch (err) {
+      logger.warn("[WEBHOOK] Bulltrend correlation check failed (non-fatal)", { err: String(err) });
+    }
+  }
+
   // Calculate RSI(14) and VWAP for the signal — non-blocking, don't fail the webhook
   try {
     const indicators = await calculateIndicators(payload.symbol, payload.price);
@@ -343,7 +372,8 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 /**
  * POST /tradingview/bulltrend — Receive bull trend confirmation from TradingView.
  *
- * Only accepts if there is a PENDING signal for the symbol.
+ * Always stored in the `bulltrends` collection.
+ * If a PENDING buy signal exists for this symbol within 6–9 minutes, marks it as Strong Buy.
  *
  * Expected payload:
  *   { "bullish_trend": "true", "symbol": "ETHUSD", "price": "2100.50", "volume": "1234567", "time": "2026-04-06T12:00:00Z", "secret": "..." }
@@ -385,36 +415,59 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
   }
 
   try {
-    // --- Find the most recent PENDING signal for this symbol ---
-    const pendingSnap = await db
-      .collection("signals")
-      .where("symbol", "==", symbol)
-      .where("status", "==", "PENDING")
-      .orderBy("createdAt", "desc")
-      .limit(1)
-      .get();
+    // Always store in bulltrends collection
+    const bulltrendDoc = await db.collection("bulltrends").add({
+      symbol,
+      bullishTrend,
+      price: !isNaN(price) ? price : null,
+      volume: !isNaN(volume) ? volume : null,
+      time: time || null,
+      createdAt: FieldValue.serverTimestamp(),
+    });
 
-    if (pendingSnap.empty) {
-      logger.info("[BULLTREND] No pending signal for symbol — rejecting", { symbol, bullishTrend });
-      res.status(404).json({ error: `No pending signal for ${symbol}`, bullish_trend: bullishTrend });
-      return;
+    logger.info("[BULLTREND] Stored", { id: bulltrendDoc.id, symbol, bullishTrend });
+
+    // Check if a PENDING buy signal exists for this symbol within the 6–9 min window
+    let matchedSignalId: string | null = null;
+    if (bullishTrend) {
+      const windowStart = new Date(Date.now() - 9 * 60 * 1000); // 9 min ago
+      const windowEnd = new Date(Date.now() - 6 * 60 * 1000);   // 6 min ago — but also allow recent ones
+      // Look for any PENDING signal created in the last 9 minutes
+      const cutoff = new Date(Date.now() - 9 * 60 * 1000);
+
+      const pendingSnap = await db
+        .collection("signals")
+        .where("symbol", "==", symbol)
+        .where("status", "==", "PENDING")
+        .where("createdAt", ">=", cutoff)
+        .orderBy("createdAt", "desc")
+        .limit(1)
+        .get();
+
+      if (!pendingSnap.empty) {
+        const signalDoc = pendingSnap.docs[0];
+        const signalCreated = signalDoc.data().createdAt?.toDate?.() as Date | undefined;
+        const ageMinutes = signalCreated ? (Date.now() - signalCreated.getTime()) / 60000 : 0;
+
+        await signalDoc.ref.update({
+          strongBuy: true,
+          bullishTrend: true,
+          bulltrendPrice: !isNaN(price) ? price : null,
+          bulltrendVolume: !isNaN(volume) ? volume : null,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        matchedSignalId = signalDoc.id;
+        logger.info("[BULLTREND] Matched PENDING signal → Strong Buy", { signalId: signalDoc.id, symbol, ageMinutes: ageMinutes.toFixed(1) });
+      }
     }
 
-    // --- Update the pending signal with bull trend data ---
-    const signalDoc = pendingSnap.docs[0];
-    const update: Record<string, unknown> = {
-      bullishTrend,
-      bulltrendUpdatedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    };
-    if (!isNaN(price) && price > 0) update.bulltrendPrice = price;
-    if (!isNaN(volume) && volume > 0) update.bulltrendVolume = volume;
-    if (time) update.bulltrendTime = time;
-
-    await signalDoc.ref.update(update);
-
-    logger.info("[BULLTREND] Updated pending signal", { signalId: signalDoc.id, symbol, bullishTrend, price, volume });
-    res.json({ status: "accepted", signalId: signalDoc.id, symbol, bullish_trend: bullishTrend });
+    res.json({
+      status: "stored",
+      id: bulltrendDoc.id,
+      symbol,
+      bullish_trend: bullishTrend,
+      matchedSignalId,
+    });
   } catch (err) {
     logger.error("[BULLTREND] Error processing webhook", { symbol, bullishTrend, err: String(err) });
     res.status(500).json({ error: "Internal server error" });

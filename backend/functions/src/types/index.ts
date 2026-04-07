@@ -28,6 +28,7 @@ export interface Signal {
   rsiConfidence?: string;
   vwapTrend?: string;
   vwapPrice?: number;
+  strongBuy?: boolean;
   bullishTrend?: boolean;
   bulltrendPrice?: number;
   bulltrendVolume?: number;

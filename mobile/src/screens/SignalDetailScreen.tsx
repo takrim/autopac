@@ -144,9 +144,15 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           value={signal.takeProfit ? `$${signal.takeProfit.toFixed(2)}` : "—"}
         />
         <DetailRow
-          label="Bull Trend"
-          value={signal.bullishTrend != null ? (signal.bullishTrend ? "Bullish ▲" : "Bearish ▼") : "Awaiting…"}
-          valueColor={signal.bullishTrend === true ? "#5cb85c" : signal.bullishTrend === false ? "#d9534f" : "#666"}
+          label="Trend Confirm"
+          value={
+            signal.strongBuy
+              ? "⚡ STRONG BUY"
+              : signal.bullishTrend != null
+                ? (signal.bullishTrend ? "Bullish ▲" : "Bearish ▼")
+                : "Awaiting…"
+          }
+          valueColor={signal.strongBuy ? "#ff9800" : signal.bullishTrend === true ? "#5cb85c" : signal.bullishTrend === false ? "#d9534f" : "#666"}
         />
         <DetailRow
           label="RSI (14)"
