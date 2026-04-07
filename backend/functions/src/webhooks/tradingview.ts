@@ -249,46 +249,53 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     }
   }
 
-  // Delete all signals older than 1 hour for this symbol (PENDING + REJECTED) and old bulltrends
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  // Delete old signals and bulltrends for this symbol
+  const oneHourAgo = Timestamp.fromDate(new Date(Date.now() - 60 * 60 * 1000));
   try {
-    // Delete all signals for this symbol older than 1 hour (any status) + all current PENDING/REJECTED
-    const oldSignals = await db
+    // Get ALL signals for this symbol, then filter in code
+    // (avoids needing composite indexes for every status+createdAt combo)
+    const allSignals = await db
       .collection("signals")
       .where("symbol", "==", payload.symbol)
-      .where("createdAt", "<=", oneHourAgo)
       .get();
 
-    const stalePending = await db
-      .collection("signals")
-      .where("symbol", "==", payload.symbol)
-      .where("status", "in", ["PENDING", "REJECTED"])
-      .get();
+    const toDelete: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+    for (const doc of allSignals.docs) {
+      const data = doc.data();
+      const status = data.status as string;
+      const createdAt = data.createdAt as Timestamp | undefined;
 
-    // Merge and deduplicate
-    const deleteIds = new Set<string>();
-    const staleSignalDocs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
-    for (const doc of [...oldSignals.docs, ...stalePending.docs]) {
-      if (!deleteIds.has(doc.id)) {
-        deleteIds.add(doc.id);
-        staleSignalDocs.push(doc);
+      // Delete if: PENDING/REJECTED (any age) OR older than 1 hour (any status)
+      if (status === "PENDING" || status === "REJECTED") {
+        toDelete.push(doc);
+      } else if (createdAt && createdAt.toMillis() < oneHourAgo.toMillis()) {
+        toDelete.push(doc);
       }
     }
 
-    // Delete old bulltrends for this symbol (older than 1 hour)
-    const staleBulltrends = await db
+    // Also delete old bulltrends
+    const allBulltrends = await db
       .collection("bulltrends")
       .where("symbol", "==", payload.symbol)
-      .where("createdAt", "<=", oneHourAgo)
       .get();
 
-    const totalDelete = staleSignalDocs.length + staleBulltrends.size;
+    const oldBulltrends = allBulltrends.docs.filter((doc) => {
+      const createdAt = doc.data().createdAt as Timestamp | undefined;
+      return createdAt && createdAt.toMillis() < oneHourAgo.toMillis();
+    });
+
+    const totalDelete = toDelete.length + oldBulltrends.length;
     if (totalDelete > 0) {
-      const batch = db.batch();
-      for (const doc of staleSignalDocs) batch.delete(doc.ref);
-      for (const doc of staleBulltrends.docs) batch.delete(doc.ref);
-      await batch.commit();
-      logger.info("[WEBHOOK] Cleaned up stale data", { symbol: payload.symbol, signals: staleSignalDocs.length, bulltrends: staleBulltrends.size });
+      // Firestore batch limit is 500
+      const allDocs = [...toDelete, ...oldBulltrends];
+      for (let i = 0; i < allDocs.length; i += 500) {
+        const batch = db.batch();
+        for (const doc of allDocs.slice(i, i + 500)) {
+          batch.delete(doc.ref);
+        }
+        await batch.commit();
+      }
+      logger.info("[WEBHOOK] Cleaned up stale data", { symbol: payload.symbol, signals: toDelete.length, bulltrends: oldBulltrends.length });
     }
   } catch (err) {
     logger.warn("[WEBHOOK] Failed to clean up stale data (non-fatal)", { err: String(err) });
