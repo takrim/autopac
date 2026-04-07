@@ -249,24 +249,24 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     }
   }
 
-  // Reject all existing PENDING signals for this symbol (superseded by new signal)
+  // Delete stale PENDING and REJECTED signals for this symbol
   try {
-    const pendingSnap = await db
+    const staleSnap = await db
       .collection("signals")
       .where("symbol", "==", payload.symbol)
-      .where("status", "==", "PENDING")
+      .where("status", "in", ["PENDING", "REJECTED"])
       .get();
 
-    if (!pendingSnap.empty) {
+    if (!staleSnap.empty) {
       const batch = db.batch();
-      for (const doc of pendingSnap.docs) {
+      for (const doc of staleSnap.docs) {
         batch.delete(doc.ref);
       }
       await batch.commit();
-      logger.info("[WEBHOOK] Deleted stale pending signals", { symbol: payload.symbol, count: pendingSnap.size });
+      logger.info("[WEBHOOK] Deleted stale signals", { symbol: payload.symbol, count: staleSnap.size });
     }
   } catch (err) {
-    logger.warn("[WEBHOOK] Failed to reject stale signals (non-fatal)", { err: String(err) });
+    logger.warn("[WEBHOOK] Failed to delete stale signals (non-fatal)", { err: String(err) });
   }
 
   // Store signal
