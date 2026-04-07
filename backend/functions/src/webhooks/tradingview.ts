@@ -249,24 +249,33 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     }
   }
 
-  // Delete stale PENDING and REJECTED signals for this symbol
+  // Delete all signals older than 1 hour for this symbol (PENDING + REJECTED) and old bulltrends
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
   try {
-    const staleSnap = await db
+    // Delete stale signals (PENDING/REJECTED)
+    const staleSignals = await db
       .collection("signals")
       .where("symbol", "==", payload.symbol)
       .where("status", "in", ["PENDING", "REJECTED"])
       .get();
 
-    if (!staleSnap.empty) {
+    // Delete old bulltrends for this symbol (older than 1 hour)
+    const staleBulltrends = await db
+      .collection("bulltrends")
+      .where("symbol", "==", payload.symbol)
+      .where("createdAt", "<=", oneHourAgo)
+      .get();
+
+    const totalDelete = staleSignals.size + staleBulltrends.size;
+    if (totalDelete > 0) {
       const batch = db.batch();
-      for (const doc of staleSnap.docs) {
-        batch.delete(doc.ref);
-      }
+      for (const doc of staleSignals.docs) batch.delete(doc.ref);
+      for (const doc of staleBulltrends.docs) batch.delete(doc.ref);
       await batch.commit();
-      logger.info("[WEBHOOK] Deleted stale signals", { symbol: payload.symbol, count: staleSnap.size });
+      logger.info("[WEBHOOK] Cleaned up stale data", { symbol: payload.symbol, signals: staleSignals.size, bulltrends: staleBulltrends.size });
     }
   } catch (err) {
-    logger.warn("[WEBHOOK] Failed to delete stale signals (non-fatal)", { err: String(err) });
+    logger.warn("[WEBHOOK] Failed to clean up stale data (non-fatal)", { err: String(err) });
   }
 
   // Store signal
