@@ -9,6 +9,7 @@ import { sendSignalNotification } from "../services/notification";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
+import { liquidateSymbol } from "../api/alpaca";
 
 const db = getFirestore();
 
@@ -347,7 +348,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
         logger.info("[WEBHOOK] Recent bulltrend found → Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
       }
     } catch (err) {
-      logger.warn("[WEBHOOK] Bulltrend correlation check failed (non-fatal)", { err: String(err) });
+      logger.warn("[WEBHOOK] Bulltrend correlation check failed (non-fatal)", { symbol: payload.symbol, error: String(err) });
     }
   }
 
@@ -372,15 +373,27 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
       logger.info("[WEBHOOK] Indicators attached to signal", { signalId: docRef.id, ...indicatorUpdate });
     }
   } catch (err) {
-    logger.error("[WEBHOOK] Indicator calculation failed (non-fatal)", { err: String(err) });
+    logger.error("[WEBHOOK] Indicator calculation failed (non-fatal)", { signalId: docRef.id, symbol: payload.symbol, error: String(err) });
   }
 
-  // Send push notification
-  try {
-    await sendSignalNotification(signal);
-  } catch (err) {
-    // Don't fail the webhook if notification fails
-    logger.error("[WEBHOOK] Notification error (non-fatal)", err);
+  // Send push notification only for Strong Buy signals
+  const freshDoc = await docRef.get();
+  const freshData = freshDoc.data();
+  const isStrongBuy = freshData?.strongBuy === true;
+  logger.info("[WEBHOOK] Notification decision", {
+    signalId: docRef.id,
+    symbol: payload.symbol,
+    action: payload.action,
+    strongBuy: isStrongBuy,
+    willNotify: isStrongBuy,
+  });
+  if (isStrongBuy) {
+    try {
+      await sendSignalNotification({ ...signal, ...freshData, id: docRef.id } as Signal);
+      logger.info("[WEBHOOK] Notification sent for Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
+    } catch (err) {
+      logger.error("[WEBHOOK] Notification error (non-fatal)", { signalId: docRef.id, error: String(err) });
+    }
   }
 
   logger.info("[WEBHOOK] Signal created", { signalId: docRef.id, symbol: payload.symbol });
@@ -393,7 +406,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
       const orderResult = await executeOrder(signal, "auto-approve");
       res.status(201).json({ status: "auto_executed", signalId: docRef.id, order: orderResult });
     } catch (err) {
-      logger.error("[WEBHOOK] Auto-execute failed", err);
+      logger.error("[WEBHOOK] Auto-execute failed", { signalId: docRef.id, symbol: payload.symbol, error: String(err) });
       res.status(201).json({ status: "created_execution_failed", signalId: docRef.id });
     }
     return;
@@ -490,6 +503,76 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
         });
         matchedSignalId = signalDoc.id;
         logger.info("[BULLTREND] Matched PENDING signal → Strong Buy", { signalId: signalDoc.id, symbol, ageMinutes: ageMinutes.toFixed(1) });
+
+        // Send push notification now that it's a Strong Buy
+        try {
+          const updatedSnap = await signalDoc.ref.get();
+          const updatedSignal = { id: signalDoc.id, ...updatedSnap.data() } as Signal;
+          await sendSignalNotification(updatedSignal);
+          logger.info("[BULLTREND] Notification sent for Strong Buy", { signalId: signalDoc.id, symbol });
+        } catch (notifErr) {
+          logger.error("[BULLTREND] Notification error (non-fatal)", { signalId: signalDoc.id, error: String(notifErr) });
+        }
+      }
+    }
+
+    // --- RSI Mode: Auto-buy on bull trend ---
+    let rsiOrderResult: Record<string, unknown> | null = null;
+    if (bullishTrend) {
+      try {
+        const tradingConfig = await getTradingConfig();
+        const mode = tradingConfig.ORDER_MODE || "STRATEGY";
+        if (mode === "RSI" || mode === "BOTH") {
+          logger.info("[BULLTREND] RSI mode active — creating auto-buy signal", { symbol, mode });
+
+          const entryPrice = !isNaN(price) ? price : 0;
+          const slPct = tradingConfig.STOP_LOSS_PCT / 100;
+          const tpPct = tradingConfig.TAKE_PROFIT_PCT / 100;
+          const stopLoss = parseFloat((entryPrice * (1 - slPct)).toFixed(4));
+          const takeProfit = parseFloat((entryPrice * (1 + tpPct)).toFixed(4));
+
+          const rsiSignal: Signal = {
+            strategy: "rsi-bulltrend",
+            symbol,
+            action: "BUY",
+            timeframe: "3m",
+            price: entryPrice,
+            stopLoss,
+            takeProfit,
+            signalTime: time || new Date().toISOString(),
+            status: "PENDING",
+            strongBuy: true,
+            bullishTrend: true,
+            bulltrendPrice: entryPrice,
+            idempotencyKey: crypto.createHash("sha256").update(`rsi-bull:${symbol}:${Date.now()}`).digest("hex").slice(0, 32),
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          };
+
+          const rsiDocRef = await db.collection("signals").add(rsiSignal);
+          rsiSignal.id = rsiDocRef.id;
+          logger.info("[BULLTREND] RSI auto-buy signal created", { signalId: rsiDocRef.id, symbol, price: entryPrice });
+
+          // Send notification
+          try {
+            await sendSignalNotification({ ...rsiSignal, id: rsiDocRef.id } as Signal);
+            logger.info("[BULLTREND] RSI auto-buy notification sent", { signalId: rsiDocRef.id, symbol });
+          } catch (notifErr) {
+            logger.error("[BULLTREND] RSI notification error (non-fatal)", { signalId: rsiDocRef.id, error: String(notifErr) });
+          }
+
+          // Auto-execute if enabled
+          if (tradingConfig.AUTO_APPROVE) {
+            try {
+              rsiOrderResult = await executeOrder(rsiSignal, "rsi-auto");
+              logger.info("[BULLTREND] RSI auto-buy order executed", { signalId: rsiDocRef.id, symbol, order: rsiOrderResult });
+            } catch (execErr) {
+              logger.error("[BULLTREND] RSI auto-buy execution failed", { signalId: rsiDocRef.id, symbol, error: String(execErr) });
+            }
+          }
+        }
+      } catch (rsiErr) {
+        logger.error("[BULLTREND] RSI auto-buy failed (non-fatal)", { symbol, error: String(rsiErr) });
       }
     }
 
@@ -499,9 +582,119 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
       symbol,
       bullish_trend: bullishTrend,
       matchedSignalId,
+      rsiOrder: rsiOrderResult,
     });
   } catch (err) {
-    logger.error("[BULLTREND] Error processing webhook", { symbol, bullishTrend, err: String(err) });
+    logger.error("[BULLTREND] Error processing webhook", { symbol, bullishTrend, error: String(err) });
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * POST /tradingview/beartrend — Receive bear trend signal from TradingView.
+ *
+ * Stored in the `beartrends` collection.
+ * When ORDER_MODE is RSI or BOTH, auto-liquidates the position for this symbol.
+ *
+ * Expected payload:
+ *   { "bear_trend": "true", "symbol": "ETHUSD", "price": "2100.50", "time": "2026-04-06T12:00:00Z", "secret": "..." }
+ */
+export async function handleBeartrendWebhook(req: Request, res: Response): Promise<void> {
+  logger.info("[BEARTREND] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
+
+  const body = req.body || {};
+
+  // --- Validate secret ---
+  const secret = String(body.secret || "");
+  let webhookSecret: string;
+  try {
+    webhookSecret = getWebhookSecret();
+  } catch {
+    logger.error("[BEARTREND] Missing WEBHOOK_SECRET");
+    res.status(500).json({ error: "Server configuration error" });
+    return;
+  }
+
+  const secretBuf = Buffer.from(secret);
+  const expectedBuf = Buffer.from(webhookSecret);
+  if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
+    logger.warn("[BEARTREND] Invalid secret");
+    res.status(401).json({ error: "Invalid secret" });
+    return;
+  }
+
+  // --- Validate payload ---
+  const symbol = String(body.symbol || "").toUpperCase().trim();
+  const bearTrend = String(body.bear_trend || "").toLowerCase().trim() === "true";
+  const price = parseFloat(body.price);
+  const time = String(body.time || "");
+
+  if (!symbol) {
+    res.status(400).json({ error: "Missing symbol" });
+    return;
+  }
+
+  try {
+    // Store in beartrends collection
+    const beartrendDoc = await db.collection("beartrends").add({
+      symbol,
+      bearTrend,
+      price: !isNaN(price) ? price : null,
+      time: time || null,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    logger.info("[BEARTREND] Stored", { id: beartrendDoc.id, symbol, bearTrend });
+
+    // --- RSI Mode: Auto-liquidate on bear trend ---
+    let liquidationResult: Record<string, unknown> | null = null;
+    if (bearTrend) {
+      const tradingConfig = await getTradingConfig();
+      const mode = tradingConfig.ORDER_MODE || "STRATEGY";
+      if (mode === "RSI" || mode === "BOTH") {
+        logger.info("[BEARTREND] RSI mode active — attempting auto-liquidation", { symbol, mode });
+
+        try {
+          liquidationResult = await liquidateSymbol(symbol);
+          logger.info("[BEARTREND] Auto-liquidation successful", { symbol, order: liquidationResult });
+
+          // Send notification about liquidation
+          try {
+            const liquidSignal = {
+              id: beartrendDoc.id,
+              action: "SELL",
+              symbol,
+              price: !isNaN(price) ? price : 0,
+              strongBuy: false,
+            } as Signal;
+            await sendSignalNotification(liquidSignal);
+            logger.info("[BEARTREND] Liquidation notification sent", { symbol });
+          } catch (notifErr) {
+            logger.error("[BEARTREND] Notification error (non-fatal)", { symbol, error: String(notifErr) });
+          }
+        } catch (liqErr) {
+          const errMsg = String(liqErr);
+          // "No position found" is expected if we don't hold this symbol
+          if (errMsg.includes("No position found")) {
+            logger.info("[BEARTREND] No position to liquidate", { symbol });
+          } else {
+            logger.error("[BEARTREND] Auto-liquidation failed", { symbol, error: errMsg });
+          }
+        }
+      } else {
+        logger.info("[BEARTREND] STRATEGY mode — skipping auto-liquidation", { symbol, mode });
+      }
+    }
+
+    res.json({
+      status: "stored",
+      id: beartrendDoc.id,
+      symbol,
+      bear_trend: bearTrend,
+      liquidation: liquidationResult,
+    });
+  } catch (err) {
+    logger.error("[BEARTREND] Error processing webhook", { symbol, bearTrend, error: String(err) });
     res.status(500).json({ error: "Internal server error" });
   }
 }

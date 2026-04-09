@@ -16,6 +16,7 @@ export interface TradingConfig {
   ALLOWED_DIRECTIONS: "BOTH" | "LONG" | "SHORT";
   ORDER_PYRAMID: boolean;
   MAX_DAILY_TRADES: number;
+  ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
 }
 
 const DEFAULTS: TradingConfig = {
@@ -29,6 +30,7 @@ const DEFAULTS: TradingConfig = {
   ALLOWED_DIRECTIONS: "LONG",
   ORDER_PYRAMID: false,
   MAX_DAILY_TRADES: 50,
+  ORDER_MODE: "BOTH",
 };
 
 /**
@@ -70,6 +72,7 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "ALLOWED_DIRECTIONS",
   "ORDER_PYRAMID",
   "MAX_DAILY_TRADES",
+  "ORDER_MODE",
 ];
 
 /**

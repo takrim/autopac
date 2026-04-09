@@ -42,11 +42,25 @@ export async function sendSignalNotification(signal: Signal): Promise<void> {
     }
 
     // Build Expo push messages
+    const isStrongBuy = (signal as unknown as Record<string, unknown>).strongBuy === true;
+    const title = isStrongBuy ? "⚡ STRONG BUY" : "New Trade Signal";
+    const body = isStrongBuy
+      ? `Strong Buy: ${signal.symbol} @ ${signal.price}`
+      : `${signal.action} ${signal.symbol} @ ${signal.price}`;
+
+    logger.info("[NOTIFY] Preparing push notification", {
+      signalId: signal.id,
+      symbol: signal.symbol,
+      action: signal.action,
+      strongBuy: isStrongBuy,
+      tokenCount: tokens.length,
+    });
+
     const messages = tokens.map((token) => ({
       to: token,
       sound: "default" as const,
-      title: "New Trade Signal",
-      body: `${signal.action} ${signal.symbol} @ ${signal.price}`,
+      title,
+      body,
       data: {
         signalId: signal.id || "",
         type: "NEW_SIGNAL",
@@ -112,7 +126,7 @@ export async function sendSignalNotification(signal: Signal): Promise<void> {
 
     logger.info(`[NOTIFY] Sent to ${successCount}/${tokens.length} devices`);
   } catch (err) {
-    logger.error("[NOTIFY] Failed to send notification", err);
+    logger.error("[NOTIFY] Failed to send notification", { signalId: signal.id, symbol: signal.symbol, error: String(err) });
     await logAudit("NOTIFICATION_FAILED", {
       signalId: signal.id,
       details: { error: String(err) },

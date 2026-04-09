@@ -9,7 +9,7 @@ initializeApp();
 
 import { requireAuth } from "./middleware/auth";
 import { webhookRateLimiter } from "./middleware/rateLimit";
-import { handleWebhook, handleBulltrendWebhook } from "./webhooks/tradingview";
+import { handleWebhook, handleBulltrendWebhook, handleBeartrendWebhook } from "./webhooks/tradingview";
 import { handleTradeApproval } from "./api/trade";
 import {
   handleListSignals,
@@ -34,6 +34,7 @@ webhookApp.use(express.json({ limit: "10kb" }));
 webhookApp.use(webhookRateLimiter);
 
 webhookApp.post("/tradingview/bulltrend", handleBulltrendWebhook);
+webhookApp.post("/tradingview/beartrend", handleBeartrendWebhook);
 webhookApp.post("/tradingview", handleWebhook);
 
 // --- API App (authenticated) ---

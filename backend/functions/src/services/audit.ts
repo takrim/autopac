@@ -29,6 +29,6 @@ export async function logAudit(
     logger.info(`[AUDIT] ${action}`, { signalId: opts.signalId, userId: opts.userId });
   } catch (err) {
     // Audit logging should never block main flow — log error and continue
-    logger.error("[AUDIT] Failed to write audit entry", { action, err });
+    logger.error("[AUDIT] Failed to write audit entry", { action, error: String(err) });
   }
 }
