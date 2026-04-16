@@ -157,3 +157,37 @@ export async function handleRegisterToken(req: Request, res: Response): Promise<
 
   res.json({ status: "registered" });
 }
+
+/**
+ * GET /decisions — list signal decision audit trail.
+ * Optional query params: ?symbol=ETHUSD&decision=rejected&handler=bulltrend&limit=50
+ */
+export async function handleListDecisions(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+  const symbol = req.query.symbol as string | undefined;
+  const decision = req.query.decision as string | undefined;
+  const handler = req.query.handler as string | undefined;
+
+  let query: any = db.collection("signal_decisions").orderBy("createdAt", "desc").limit(limit);
+
+  if (symbol) {
+    query = query.where("symbol", "==", symbol.toUpperCase());
+  }
+  if (decision) {
+    query = query.where("decision", "==", decision.toLowerCase());
+  }
+  if (handler) {
+    query = query.where("handler", "==", handler.toLowerCase());
+  }
+
+  const snapshot = await query.get();
+  const decisions = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
+
+  res.json({ decisions });
+}

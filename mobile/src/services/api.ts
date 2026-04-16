@@ -224,3 +224,34 @@ export async function registerFcmToken(token: string): Promise<void> {
     body: JSON.stringify({ token }),
   });
 }
+
+// --- Signal Decisions ---
+
+export interface Decision {
+  id: string;
+  handler: "strategy" | "bulltrend" | "beartrend";
+  symbol: string;
+  decision: "bought" | "sold" | "rejected" | "skipped" | "error" | "stored";
+  reasons: string[];
+  rsi?: number | null;
+  price?: number | null;
+  signalId?: string | null;
+  meta?: Record<string, unknown>;
+  createdAt: any;
+}
+
+export async function fetchDecisions(params?: {
+  symbol?: string;
+  decision?: string;
+  handler?: string;
+  limit?: number;
+}): Promise<Decision[]> {
+  const query = new URLSearchParams();
+  if (params?.symbol) query.set("symbol", params.symbol);
+  if (params?.decision) query.set("decision", params.decision);
+  if (params?.handler) query.set("handler", params.handler);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  const data = await apiRequest<{ decisions: Decision[] }>(`/decisions${qs ? `?${qs}` : ""}`);
+  return data.decisions;
+}

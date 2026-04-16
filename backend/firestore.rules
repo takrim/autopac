@@ -29,5 +29,21 @@ service cloud.firestore {
     match /userTokens/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
+
+    // Bull/bear trends: only backend writes. Users can read.
+    match /bulltrends/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /beartrends/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Trading config: users can read and write
+    match /config/{docId} {
+      allow read, write: if request.auth != null;
+    }
   }
 }

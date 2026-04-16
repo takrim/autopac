@@ -13,6 +13,51 @@ import { liquidateSymbol } from "../api/alpaca";
 
 const db = getFirestore();
 
+/**
+ * Persist a signal decision record to Firestore for full audit trail.
+ */
+async function logDecision(data: {
+  handler: "strategy" | "bulltrend" | "beartrend";
+  symbol: string;
+  payload: Record<string, unknown>;
+  decision: "bought" | "sold" | "rejected" | "skipped" | "error" | "stored";
+  reasons: string[];
+  rsi?: number | null;
+  price?: number | null;
+  signalId?: string | null;
+  orderId?: string | null;
+  meta?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await db.collection("signal_decisions").add({
+      ...data,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    // Trim to newest 100 records
+    try {
+      const countSnap = await db.collection("signal_decisions")
+        .orderBy("createdAt", "desc")
+        .offset(100)
+        .limit(50)
+        .get();
+      if (!countSnap.empty) {
+        const batch = db.batch();
+        for (const doc of countSnap.docs) {
+          batch.delete(doc.ref);
+        }
+        await batch.commit();
+        logger.info("[DECISION] Trimmed old records", { deleted: countSnap.size });
+      }
+    } catch (trimErr) {
+      // Non-fatal — don't block signal processing
+      logger.warn("[DECISION] Trim failed (non-fatal)", { error: String(trimErr) });
+    }
+  } catch (err) {
+    logger.error("[DECISION] Failed to write decision record", { error: String(err), symbol: data.symbol });
+  }
+}
+
 const REQUIRED_FIELDS: (keyof WebhookPayload)[] = [
   "strategy",
   "symbol",
@@ -398,6 +443,19 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 
   logger.info("[WEBHOOK] Signal created", { signalId: docRef.id, symbol: payload.symbol });
 
+  // Log decision
+  await logDecision({
+    handler: "strategy",
+    symbol: payload.symbol,
+    payload: { strategy: payload.strategy, action: payload.action, timeframe: payload.timeframe, price: payload.price, signalTime: payload.signalTime },
+    decision: isStrongBuy ? "bought" : "stored",
+    reasons: isStrongBuy ? ["Strong Buy — strategy + bulltrend correlated"] : ["Strategy signal stored — waiting for bulltrend correlation"],
+    rsi: freshData?.rsi ?? null,
+    price: payload.price,
+    signalId: docRef.id,
+    meta: { strongBuy: isStrongBuy, idempotencyKey },
+  });
+
   // Auto-approve: skip manual approval and execute immediately
   if (tradingConfig.AUTO_APPROVE) {
     logger.info("[WEBHOOK] Auto-approve enabled — executing order", { signalId: docRef.id });
@@ -453,6 +511,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
   const price = parseFloat(body.price);
   const volume = parseFloat(body.volume);
   const time = String(body.time || "");
+  const rsiOverride = body.rsi !== undefined ? parseFloat(body.rsi) : NaN;
 
   if (!symbol) {
     res.status(400).json({ error: "Missing symbol" });
@@ -518,18 +577,71 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
 
     // --- RSI Mode: Auto-buy on bull trend ---
     let rsiOrderResult: Record<string, unknown> | null = null;
-    if (bullishTrend) {
+    if (!bullishTrend) {
+      await logDecision({
+        handler: "bulltrend",
+        symbol,
+        payload: { bullish_trend: bullishTrend, price, volume, time },
+        decision: "skipped",
+        reasons: ["bullish_trend is false — no buy evaluation"],
+        price: !isNaN(price) ? price : null,
+        meta: { bulltrendId: bulltrendDoc.id },
+      });
+    } else {
       try {
         const tradingConfig = await getTradingConfig();
         const mode = tradingConfig.ORDER_MODE || "STRATEGY";
         if (mode === "RSI" || mode === "BOTH") {
-          logger.info("[BULLTREND] RSI mode active — creating auto-buy signal", { symbol, mode });
+          logger.info("[BULLTREND] RSI mode active — evaluating buy decision", { symbol, mode });
 
           const entryPrice = !isNaN(price) ? price : 0;
-          const slPct = tradingConfig.STOP_LOSS_PCT / 100;
-          const tpPct = tradingConfig.TAKE_PROFIT_PCT / 100;
-          const stopLoss = parseFloat((entryPrice * (1 - slPct)).toFixed(4));
-          const takeProfit = parseFloat((entryPrice * (1 + tpPct)).toFixed(4));
+
+          // Use RSI override if provided, otherwise calculate from Alpaca bars
+          let buyRsi: number | undefined;
+          if (!isNaN(rsiOverride)) {
+            buyRsi = parseFloat(rsiOverride.toFixed(2));
+            logger.info("[BULLTREND] RSI override provided", { symbol, rsi: buyRsi });
+          } else {
+            try {
+              const indicators = await calculateIndicators(symbol, entryPrice);
+              if (indicators.rsi !== null) {
+                buyRsi = parseFloat(indicators.rsi.toFixed(2));
+              }
+              logger.info("[BULLTREND] RSI calculated", { symbol, rsi: buyRsi ?? "unavailable" });
+            } catch (indErr) {
+              logger.warn("[BULLTREND] RSI calculation failed (non-fatal)", { symbol, error: String(indErr) });
+            }
+          }
+
+          // RSI Buy validation: only buy if RSI is in oversold zone (25-35, i.e. ±5 of 30)
+          const rsiInBuyZone = buyRsi !== undefined && buyRsi >= 25 && buyRsi <= 35;
+          const rsiTooHigh = buyRsi !== undefined && buyRsi > 35;
+          const rsiUnavailable = buyRsi === undefined;
+          const shouldBuy = rsiInBuyZone;
+
+          const buyReasons: string[] = [];
+          if (rsiInBuyZone) buyReasons.push(`RSI in buy zone (${buyRsi} is within 25-35)`);
+          if (rsiTooHigh) buyReasons.push(`RSI too high (${buyRsi} > 35) — not a good entry`);
+          if (rsiUnavailable) buyReasons.push("RSI unavailable — skipping buy (fail-closed)");
+          if (buyRsi !== undefined && buyRsi < 25) buyReasons.push(`RSI extremely oversold (${buyRsi} < 25) — caution, may be falling knife`);
+
+          logger.info("[BULLTREND] Buy decision", { symbol, rsi: buyRsi ?? null, rsiInBuyZone, rsiTooHigh, shouldBuy, reasons: buyReasons });
+
+          if (!shouldBuy) {
+            logger.info("[BULLTREND] Skipping auto-buy — RSI does not confirm buy", { symbol, rsi: buyRsi });
+            // Log rejection decision
+            await logDecision({
+              handler: "bulltrend",
+              symbol,
+              payload: { bullish_trend: bullishTrend, price, volume, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+              decision: "rejected",
+              reasons: buyReasons,
+              rsi: buyRsi ?? null,
+              price: !isNaN(price) ? price : null,
+              meta: { rsiInBuyZone, rsiTooHigh, rsiUnavailable, bulltrendId: bulltrendDoc.id, matchedSignalId },
+            });
+            // Still store the bulltrend but skip order creation
+          } else {
 
           const rsiSignal: Signal = {
             strategy: "rsi-bulltrend",
@@ -537,13 +649,12 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             action: "BUY",
             timeframe: "3m",
             price: entryPrice,
-            stopLoss,
-            takeProfit,
             signalTime: time || new Date().toISOString(),
             status: "PENDING",
-            strongBuy: true,
+            strongBuy: rsiInBuyZone,
             bullishTrend: true,
             bulltrendPrice: entryPrice,
+            ...(buyRsi !== undefined && { rsi: buyRsi }),
             idempotencyKey: crypto.createHash("sha256").update(`rsi-bull:${symbol}:${Date.now()}`).digest("hex").slice(0, 32),
             createdAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp(),
@@ -551,7 +662,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
 
           const rsiDocRef = await db.collection("signals").add(rsiSignal);
           rsiSignal.id = rsiDocRef.id;
-          logger.info("[BULLTREND] RSI auto-buy signal created", { signalId: rsiDocRef.id, symbol, price: entryPrice });
+          logger.info("[BULLTREND] RSI auto-buy signal created", { signalId: rsiDocRef.id, symbol, price: entryPrice, rsi: buyRsi ?? "unavailable" });
 
           // Send notification
           try {
@@ -560,6 +671,19 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           } catch (notifErr) {
             logger.error("[BULLTREND] RSI notification error (non-fatal)", { signalId: rsiDocRef.id, error: String(notifErr) });
           }
+
+          // Log buy decision
+          await logDecision({
+            handler: "bulltrend",
+            symbol,
+            payload: { bullish_trend: bullishTrend, price, volume, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+            decision: "bought",
+            reasons: buyReasons,
+            rsi: buyRsi ?? null,
+            price: entryPrice,
+            signalId: rsiDocRef.id,
+            meta: { rsiInBuyZone, rsiTooHigh, bulltrendId: bulltrendDoc.id, matchedSignalId },
+          });
 
           // Auto-execute if enabled
           if (tradingConfig.AUTO_APPROVE) {
@@ -570,11 +694,22 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
               logger.error("[BULLTREND] RSI auto-buy execution failed", { signalId: rsiDocRef.id, symbol, error: String(execErr) });
             }
           }
+          } // end shouldBuy else
+        } else {
+          await logDecision({
+            handler: "bulltrend",
+            symbol,
+            payload: { bullish_trend: bullishTrend, price, volume, time },
+            decision: "skipped",
+            reasons: [`ORDER_MODE is ${mode} — RSI auto-buy not active`],
+            price: !isNaN(price) ? price : null,
+            meta: { mode, bulltrendId: bulltrendDoc.id, matchedSignalId },
+          });
         }
       } catch (rsiErr) {
         logger.error("[BULLTREND] RSI auto-buy failed (non-fatal)", { symbol, error: String(rsiErr) });
       }
-    }
+    } // end bullishTrend else
 
     res.json({
       status: "stored",
@@ -628,6 +763,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
   const bearTrend = String(body.bear_trend || "").toLowerCase().trim() === "true";
   const price = parseFloat(body.price);
   const time = String(body.time || "");
+  const rsiOverride = body.rsi !== undefined ? parseFloat(body.rsi) : NaN;
 
   if (!symbol) {
     res.status(400).json({ error: "Missing symbol" });
@@ -646,39 +782,131 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
 
     logger.info("[BEARTREND] Stored", { id: beartrendDoc.id, symbol, bearTrend });
 
-    // --- RSI Mode: Auto-liquidate on bear trend ---
+    // --- RSI Mode: Auto-liquidate on bear trend (with RSI validation) ---
     let liquidationResult: Record<string, unknown> | null = null;
+    let sellDecision: Record<string, unknown> | null = null;
     if (bearTrend) {
       const tradingConfig = await getTradingConfig();
       const mode = tradingConfig.ORDER_MODE || "STRATEGY";
       if (mode === "RSI" || mode === "BOTH") {
-        logger.info("[BEARTREND] RSI mode active — attempting auto-liquidation", { symbol, mode });
+        logger.info("[BEARTREND] RSI mode active — evaluating sell decision", { symbol, mode });
 
-        try {
-          liquidationResult = await liquidateSymbol(symbol);
-          logger.info("[BEARTREND] Auto-liquidation successful", { symbol, order: liquidationResult });
-
-          // Send notification about liquidation
+        // Use RSI override if provided, otherwise calculate from Alpaca bars
+        let currentRsi: number | null = null;
+        if (!isNaN(rsiOverride)) {
+          currentRsi = parseFloat(rsiOverride.toFixed(2));
+          logger.info("[BEARTREND] RSI override provided", { symbol, rsi: currentRsi });
+        } else {
           try {
-            const liquidSignal = {
-              id: beartrendDoc.id,
-              action: "SELL",
-              symbol,
-              price: !isNaN(price) ? price : 0,
-              strongBuy: false,
-            } as Signal;
-            await sendSignalNotification(liquidSignal);
-            logger.info("[BEARTREND] Liquidation notification sent", { symbol });
-          } catch (notifErr) {
-            logger.error("[BEARTREND] Notification error (non-fatal)", { symbol, error: String(notifErr) });
+            const currentPrice = !isNaN(price) ? price : 0;
+            const indicators = await calculateIndicators(symbol, currentPrice);
+            currentRsi = indicators.rsi !== null ? parseFloat(indicators.rsi.toFixed(2)) : null;
+          } catch (indErr) {
+            logger.warn("[BEARTREND] RSI calculation failed (non-fatal)", { symbol, error: String(indErr) });
           }
-        } catch (liqErr) {
-          const errMsg = String(liqErr);
-          // "No position found" is expected if we don't hold this symbol
-          if (errMsg.includes("No position found")) {
-            logger.info("[BEARTREND] No position to liquidate", { symbol });
-          } else {
-            logger.error("[BEARTREND] Auto-liquidation failed", { symbol, error: errMsg });
+        }
+
+        // Find the most recent BUY signal for this symbol to get buy-time RSI
+        let buyRsi: number | null = null;
+        try {
+          const buySnap = await db
+            .collection("signals")
+            .where("symbol", "==", symbol)
+            .where("action", "==", "BUY")
+            .orderBy("createdAt", "desc")
+            .limit(1)
+            .get();
+          if (!buySnap.empty) {
+            buyRsi = buySnap.docs[0].data().rsi ?? null;
+          }
+        } catch (queryErr) {
+          logger.warn("[BEARTREND] Buy signal lookup failed (non-fatal)", { symbol, error: String(queryErr) });
+        }
+
+        // Sell decision logic:
+        // (a) Current RSI < RSI at buy time (momentum faded)
+        // (b) Current RSI is in overbought zone: 65-75 (±5 of 70)
+        // (c) If RSI unavailable, proceed with sell (fail-open for safety)
+        const rsiDroppedBelowBuy = currentRsi !== null && buyRsi !== null && currentRsi < buyRsi;
+        const rsiInOverboughtZone = currentRsi !== null && currentRsi >= 65 && currentRsi <= 75;
+        const rsiUnavailable = currentRsi === null;
+        const shouldSell = rsiDroppedBelowBuy || rsiInOverboughtZone || rsiUnavailable;
+
+        const reasons: string[] = [];
+        if (rsiDroppedBelowBuy) reasons.push(`RSI dropped below buy (current=${currentRsi} < buy=${buyRsi})`);
+        if (rsiInOverboughtZone) reasons.push(`RSI in overbought zone (${currentRsi} is within 65-75)`);
+        if (rsiUnavailable) reasons.push("RSI unavailable — fail-open sell");
+        if (!shouldSell) reasons.push(`RSI does not justify sell (current=${currentRsi}, buy=${buyRsi}, not in 65-75 zone)`);
+
+        sellDecision = {
+          currentRsi,
+          buyRsi,
+          rsiDroppedBelowBuy,
+          rsiInOverboughtZone,
+          rsiUnavailable,
+          shouldSell,
+          reasons,
+        };
+
+        logger.info("[BEARTREND] Sell decision", { symbol, ...sellDecision });
+
+        if (!shouldSell) {
+          logger.info("[BEARTREND] Skipping liquidation — RSI does not confirm sell", { symbol, currentRsi, buyRsi });            await logDecision({
+              handler: "beartrend",
+              symbol,
+              payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+              decision: "rejected",
+              reasons,
+              rsi: currentRsi,
+              price: !isNaN(price) ? price : null,
+              meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id },
+            });        } else {
+          try {
+            liquidationResult = await liquidateSymbol(symbol);
+            logger.info("[BEARTREND] Auto-liquidation executed", { symbol, reasons, order: liquidationResult });
+            await logDecision({
+              handler: "beartrend",
+              symbol,
+              payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+              decision: "sold",
+              reasons,
+              rsi: currentRsi,
+              price: !isNaN(price) ? price : null,
+              meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id, liquidationResult },
+            });
+
+            // Send notification about liquidation
+            try {
+              const liquidSignal = {
+                id: beartrendDoc.id,
+                action: "SELL",
+                symbol,
+                price: !isNaN(price) ? price : 0,
+                strongBuy: false,
+              } as Signal;
+              await sendSignalNotification(liquidSignal);
+              logger.info("[BEARTREND] Liquidation notification sent", { symbol });
+            } catch (notifErr) {
+              logger.error("[BEARTREND] Notification error (non-fatal)", { symbol, error: String(notifErr) });
+            }
+          } catch (liqErr) {
+            const errMsg = String(liqErr);
+            // "No position found" is expected if we don't hold this symbol
+            if (errMsg.includes("No position found")) {
+              logger.info("[BEARTREND] No position to liquidate", { symbol });
+              await logDecision({
+                handler: "beartrend",
+                symbol,
+                payload: { bear_trend: bearTrend, price, time },
+                decision: "skipped",
+                reasons: [...reasons, "No position to liquidate"],
+                rsi: currentRsi,
+                price: !isNaN(price) ? price : null,
+                meta: { currentRsi, buyRsi, beartrendId: beartrendDoc.id },
+              });
+            } else {
+              logger.error("[BEARTREND] Auto-liquidation failed", { symbol, error: errMsg });
+            }
           }
         }
       } else {
@@ -691,6 +919,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
       id: beartrendDoc.id,
       symbol,
       bear_trend: bearTrend,
+      sellDecision,
       liquidation: liquidationResult,
     });
   } catch (err) {

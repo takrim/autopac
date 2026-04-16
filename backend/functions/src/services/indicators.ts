@@ -39,7 +39,7 @@ export async function calculateIndicators(symbol: string, currentPrice: number):
     if (isCrypto) {
       const cryptoSymbol = symbol.includes("/") ? symbol : symbol.replace(/USD$/, "") + "/USD";
       const resp = await fetch(
-        `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${encodeURIComponent(cryptoSymbol)}&timeframe=3Min&limit=30`,
+        `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${encodeURIComponent(cryptoSymbol)}&timeframe=3Min&limit=500`,
         { headers }
       );
       if (resp.ok) {
@@ -53,7 +53,7 @@ export async function calculateIndicators(symbol: string, currentPrice: number):
       }
     } else {
       const resp = await fetch(
-        `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/bars?timeframe=3Min&limit=30`,
+        `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/bars?timeframe=3Min&limit=500`,
         { headers }
       );
       if (resp.ok) {

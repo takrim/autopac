@@ -18,6 +18,7 @@ import {
   handleRegisterToken,
   handleListWebhookErrors,
   handleListBrokerErrors,
+  handleListDecisions,
 } from "./api/signals";
 import {
   handleGetAccount,
@@ -50,6 +51,7 @@ apiApp.get("/signals/:id", handleGetSignal);
 apiApp.get("/orders", handleListOrders);
 apiApp.get("/webhook-errors", handleListWebhookErrors);
 apiApp.get("/broker-errors", handleListBrokerErrors);
+apiApp.get("/decisions", handleListDecisions);
 apiApp.post("/fcm-token", handleRegisterToken);
 apiApp.get("/account", handleGetAccount);
 apiApp.get("/positions", handleGetPositions);

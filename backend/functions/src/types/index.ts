@@ -17,8 +17,8 @@ export interface Signal {
   action: SignalAction;
   timeframe: string;
   price: number;
-  stopLoss: number;
-  takeProfit: number;
+  stopLoss?: number;
+  takeProfit?: number;
   signalTime: string;
   status: SignalStatus;
   statusMessage?: string;
