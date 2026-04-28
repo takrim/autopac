@@ -194,7 +194,7 @@ export default function SignalInboxScreen({ navigation }: Props) {
                 )}
                 {d.price != null && (
                   <Text style={styles.decisionPrice}>
-                    ${d.price < 1 ? d.price.toPrecision(4) : d.price.toFixed(2)}
+                    ${d.price < 1 ? d.price.toPrecision(4) : d.price.toFixed(4)}
                   </Text>
                 )}
                 <Text style={styles.decisionTime}>

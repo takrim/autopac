@@ -153,17 +153,41 @@ export interface Position {
   side: string;
   asset_class: string;
   simulated_fees?: string;
+  actual_fees?: string;
   fee_rate?: number;
+  stop_loss?: string;
+}
+
+export interface PerformanceMetric {
+  realizedPl: number;
+  trades: number;
+}
+
+export interface PositionsResponse {
+  positions: Position[];
+  cashBalance?: number;
+  performance?: Record<string, PerformanceMetric>;
 }
 
 export async function fetchPositions(): Promise<Position[]> {
-  const data = await apiRequest<{ positions: Position[] }>("/positions");
+  const data = await apiRequest<PositionsResponse>("/positions");
   return data.positions;
+}
+
+export async function fetchPositionsWithMeta(): Promise<PositionsResponse> {
+  return apiRequest<PositionsResponse>("/positions");
 }
 
 export async function liquidatePosition(symbol: string): Promise<{ status: string; cancelledOrders: number }> {
   return apiRequest(`/positions/${encodeURIComponent(symbol)}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateStopLoss(symbol: string, stopPrice: number): Promise<{ status: string; stopPrice: number; orderId?: string; message: string }> {
+  return apiRequest(`/positions/${encodeURIComponent(symbol)}/stop-loss`, {
+    method: "POST",
+    body: JSON.stringify({ stopPrice }),
   });
 }
 
@@ -190,10 +214,15 @@ export async function fetchPortfolioHistory(
 
 // --- Trading Config ---
 
+export interface BrokerSettings {
+  tradeValueUsd: number;
+  allowedSymbols: string[];
+}
+
 export interface TradingConfig {
   AUTO_APPROVE: boolean;
   PAPER_TRADING: boolean;
-  ACTIVE_BROKER: "mock" | "alpaca";
+  ACTIVE_BROKER: "mock" | "alpaca" | "coinbase";
   TRADE_VALUE_USD: number;
   STOP_LOSS_PCT: number;
   TAKE_PROFIT_PCT: number;
@@ -201,6 +230,8 @@ export interface TradingConfig {
   ALLOWED_DIRECTIONS: "BOTH" | "LONG" | "SHORT";
   ORDER_PYRAMID: boolean;
   MAX_DAILY_TRADES: number;
+  ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
+  brokerSettings: Record<string, BrokerSettings>;
 }
 
 export async function fetchConfig(): Promise<TradingConfig> {
@@ -254,4 +285,34 @@ export async function fetchDecisions(params?: {
   const qs = query.toString();
   const data = await apiRequest<{ decisions: Decision[] }>(`/decisions${qs ? `?${qs}` : ""}`);
   return data.decisions;
+}
+
+// --- Trending Crypto ---
+
+export interface TrendingCrypto {
+  symbol: string;
+  name: string;
+  price: number;
+  priceChange24h: number;
+  volume24h: number;
+  volumeChange24h: number;
+  quoteVolume24h: number;
+  color: string;
+  imageUrl: string;
+  description: string;
+  website: string;
+  assetType: string;
+  launchedAt: string;
+}
+
+export async function fetchTrending(params?: {
+  sort?: string;
+  limit?: number;
+}): Promise<TrendingCrypto[]> {
+  const query = new URLSearchParams();
+  if (params?.sort) query.set("sort", params.sort);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  const data = await apiRequest<{ trending: TrendingCrypto[] }>(`/trending${qs ? `?${qs}` : ""}`);
+  return data.trending;
 }

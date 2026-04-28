@@ -25,8 +25,10 @@ import {
   handleGetPositions,
   handleGetPortfolioHistory,
   handleLiquidatePosition,
+  handleUpdateStopLoss,
 } from "./api/alpaca";
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
+import { handleGetTrending } from "./api/trending";
 
 // --- Webhook App (no auth — uses shared secret) ---
 const webhookApp = express();
@@ -56,9 +58,11 @@ apiApp.post("/fcm-token", handleRegisterToken);
 apiApp.get("/account", handleGetAccount);
 apiApp.get("/positions", handleGetPositions);
 apiApp.delete("/positions/:symbol", handleLiquidatePosition);
+apiApp.post("/positions/:symbol/stop-loss", handleUpdateStopLoss);
 apiApp.get("/portfolio-history", handleGetPortfolioHistory);
 apiApp.get("/config", handleGetConfig);
 apiApp.patch("/config", handleUpdateConfig);
+apiApp.get("/trending", handleGetTrending);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.
@@ -69,7 +73,7 @@ export const webhook = onRequest(
     maxInstances: 10,
     timeoutSeconds: 120,
     invoker: "public",
-    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET"],
+    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET"],
   },
   webhookApp
 );
@@ -79,7 +83,7 @@ export const api = onRequest(
     region: "us-central1",
     maxInstances: 10,
     invoker: "public",
-    secrets: ["ALPACA_API_KEY", "ALPACA_API_SECRET"],
+    secrets: ["ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET"],
   },
   apiApp
 );

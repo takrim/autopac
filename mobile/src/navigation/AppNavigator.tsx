@@ -11,6 +11,7 @@ import SignalDetailScreen from "../screens/SignalDetailScreen";
 import PositionsScreen from "../screens/PositionsScreen";
 import OrdersScreen from "../screens/OrdersScreen";
 import SettingsScreen from "../screens/SettingsScreen";
+import TrendingScreen from "../screens/TrendingScreen";
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -56,6 +57,16 @@ function MainTabs() {
           ...screenOptions,
           headerShown: true,
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>📈</Text>,
+        }}
+      />
+      <Tab.Screen
+        name="TrendingTab"
+        component={TrendingScreen}
+        options={{
+          title: "Trending",
+          ...screenOptions,
+          headerShown: true,
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>🔥</Text>,
         }}
       />
       <Tab.Screen

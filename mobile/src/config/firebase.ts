@@ -6,9 +6,10 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import {
   initializeAuth,
   getAuth,
-  getReactNativePersistence,
   Auth,
 } from "firebase/auth";
+// @ts-expect-error getReactNativePersistence is resolved by Metro's RN entry point but not in web types
+import { getReactNativePersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";

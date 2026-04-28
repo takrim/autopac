@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { logger } from "firebase-functions/v2";
 import { getAlpacaConfig } from "../config";
 import { getTradingConfig } from "./config";
+import { getBroker } from "../brokers";
 
 function getHeaders() {
   const config = getAlpacaConfig();
@@ -59,7 +60,7 @@ export async function handleGetAccount(req: Request, res: Response): Promise<voi
 }
 
 /**
- * GET /positions — proxy Alpaca open positions with P&L.
+ * GET /positions — returns open positions with P&L, routed by active broker.
  */
 export async function handleGetPositions(req: Request, res: Response): Promise<void> {
   const user = (req as any).user;
@@ -69,6 +70,37 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
   }
 
   try {
+    const tradingConfig = await getTradingConfig();
+
+    // If active broker supports detailed positions, use it
+    if (tradingConfig.ACTIVE_BROKER === "coinbase") {
+      const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker;
+      if (broker.getDetailedPositions) {
+        const positions = await broker.getDetailedPositions();
+
+        // Get USD cash balance from Coinbase accounts
+        let cashBalance = 0;
+        try {
+          const cbData = await broker.getCashBalance();
+          cashBalance = cbData;
+        } catch (cashErr) {
+          logger.warn("[API] Failed to get cash balance (non-fatal)", { error: String(cashErr) });
+        }
+
+        // Compute performance metrics from Coinbase fill history
+        let performance: Record<string, unknown> = {};
+        try {
+          performance = await broker.getPerformanceMetrics();
+        } catch (perfErr) {
+          logger.warn("[API] Failed to get performance metrics (non-fatal)", { error: String(perfErr) });
+        }
+
+        res.json({ positions, cashBalance, performance });
+        return;
+      }
+    }
+
+    // Default: Alpaca positions with simulated fees
     const config = getAlpacaConfig();
     const resp = await fetch(`${config.baseUrl}/v2/positions`, {
       headers: getHeaders(),
@@ -82,7 +114,6 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
     }
 
     const positions = (await resp.json()) as Array<Record<string, unknown>>;
-    const tradingConfig = await getTradingConfig();
     const feeRate = tradingConfig.SIMULATED_FEE_RATE;
 
     const mapped = positions.map((p) => {
@@ -135,103 +166,57 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
 
 /**
  * Liquidate a position by symbol (reusable, non-HTTP).
+ * Delegates to the active broker's liquidatePosition method.
  * Returns the order data on success, throws on failure.
  */
 export async function liquidateSymbol(symbol: string): Promise<Record<string, unknown>> {
-  const config = getAlpacaConfig();
-  const headers = getHeaders();
+  const { getTradingConfig } = await import("./config");
+  const tradingConfig = await getTradingConfig();
+  const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+  logger.info("[LIQUIDATE] Delegating to broker", { broker: broker.name, symbol });
+  return broker.liquidatePosition(symbol);
+}
 
-  // For crypto, Alpaca uses slash-separated symbols for orders
-  const cryptoSymbol = symbol.endsWith("USD") && !symbol.includes("/")
-    ? symbol.slice(0, -3) + "/USD"
-    : symbol;
+/**
+ * POST /positions/:symbol/stop-loss — update stop loss for a Coinbase position.
+ * Body: { stopPrice: number }
+ */
+export async function handleUpdateStopLoss(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
 
-  // 1. Cancel all open orders for this symbol
-  let cancelledCount = 0;
+  const { symbol } = req.params;
+  const stopPrice = parseFloat(req.body?.stopPrice);
+
+  if (!symbol) {
+    res.status(400).json({ error: "Missing symbol" });
+    return;
+  }
+  if (isNaN(stopPrice) || stopPrice <= 0) {
+    res.status(400).json({ error: "Invalid stopPrice" });
+    return;
+  }
+
   try {
-    for (const sym of [symbol, cryptoSymbol]) {
-      const ordersResp = await fetch(
-        `${config.baseUrl}/v2/orders?status=open&symbols=${encodeURIComponent(sym)}&limit=100`,
-        { headers }
-      );
-      if (ordersResp.ok) {
-        const orders = (await ordersResp.json()) as Array<{ id: string }>;
-        for (const order of orders) {
-          const cancelResp = await fetch(`${config.baseUrl}/v2/orders/${order.id}`, {
-            method: "DELETE",
-            headers,
-          });
-          if (cancelResp.ok || cancelResp.status === 204) cancelledCount++;
-        }
-      }
+    const tradingConfig = await getTradingConfig();
+    if (tradingConfig.ACTIVE_BROKER !== "coinbase") {
+      res.status(400).json({ error: "Stop loss update only supported for Coinbase" });
+      return;
     }
-    if (cancelledCount > 0) {
-      logger.info("[LIQUIDATE] Cancelled open orders", { symbol, cancelledCount });
+    const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker;
+    const result = await broker.updateStopLoss(symbol, stopPrice);
+    if (!result.success) {
+      res.status(500).json({ error: result.message });
+      return;
     }
-  } catch (cancelErr) {
-    logger.warn("[LIQUIDATE] Error cancelling orders", { symbol, error: String(cancelErr) });
+    res.json({ status: "updated", symbol, stopPrice, orderId: result.orderId, message: result.message });
+  } catch (err) {
+    logger.error("[API] updateStopLoss error", { symbol, error: String(err) });
+    res.status(500).json({ error: String(err) });
   }
-
-  // 2. Fetch current position
-  const posSymbol = encodeURIComponent(symbol);
-  const posResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, { headers });
-  if (!posResp.ok) {
-    throw new Error(`No position found for ${symbol}`);
-  }
-  const position = (await posResp.json()) as Record<string, string>;
-  const isCrypto = (position.asset_class || "").toLowerCase() === "crypto";
-
-  const isMarketOpen = (() => {
-    const now = new Date();
-    const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
-    const day = et.getDay();
-    if (day === 0 || day === 6) return false;
-    const mins = et.getHours() * 60 + et.getMinutes();
-    return mins >= 570 && mins < 960;
-  })();
-
-  let closeData: Record<string, unknown>;
-
-  if (!isCrypto && !isMarketOpen) {
-    const currentPrice = parseFloat(position.current_price || "0");
-    const limitPrice = (currentPrice * 0.98).toFixed(2);
-    const orderResp = await fetch(`${config.baseUrl}/v2/orders`, {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        symbol,
-        qty: position.qty,
-        side: "sell",
-        type: "limit",
-        limit_price: limitPrice,
-        time_in_force: "day",
-        extended_hours: true,
-      }),
-    });
-
-    if (!orderResp.ok) {
-      let errMsg = await orderResp.text();
-      try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
-      throw new Error(`Extended hours liquidation failed: ${errMsg}`);
-    }
-    closeData = (await orderResp.json()) as Record<string, unknown>;
-    logger.info("[LIQUIDATE] Extended hours limit sell placed", { symbol, qty: position.qty, limitPrice });
-  } else {
-    const closeResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, {
-      method: "DELETE",
-      headers,
-    });
-
-    if (!closeResp.ok) {
-      let errMsg = await closeResp.text();
-      try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
-      throw new Error(`Liquidation failed: ${errMsg}`);
-    }
-    closeData = (await closeResp.json()) as Record<string, unknown>;
-  }
-
-  logger.info("[LIQUIDATE] Position liquidated", { symbol, cancelledOrders: cancelledCount });
-  return closeData;
 }
 
 /**

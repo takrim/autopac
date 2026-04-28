@@ -32,7 +32,7 @@ export const CONFIG = {
   ALLOWED_ORDER_COMMENTS: ["LE"] as string[],
 
   // Broker
-  ACTIVE_BROKER: (process.env.ACTIVE_BROKER || "mock") as "mock" | "alpaca",
+  ACTIVE_BROKER: (process.env.ACTIVE_BROKER || "mock") as "mock" | "alpaca" | "coinbase",
 
   // Order pyramiding: allow multiple buys on the same symbol
   ORDER_PYRAMID: process.env.ORDER_PYRAMID === "true",
@@ -69,5 +69,17 @@ export function getAlpacaConfig() {
     apiKey: process.env.ALPACA_API_KEY || "",
     apiSecret: process.env.ALPACA_API_SECRET || "",
     baseUrl: process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets",
+  };
+}
+
+/**
+ * Get Coinbase CDP API credentials from env.
+ * apiKey: "organizations/{org_id}/apiKeys/{key_id}"
+ * apiSecret: EC private key (PEM, ECDSA P-256)
+ */
+export function getCoinbaseConfig() {
+  return {
+    apiKey: process.env.COINBASE_API_KEY || "",
+    apiSecret: (process.env.COINBASE_API_SECRET || "").replace(/\\n/g, "\n"),
   };
 }

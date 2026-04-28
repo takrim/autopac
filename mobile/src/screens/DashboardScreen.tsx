@@ -14,31 +14,49 @@ import {
   AlpacaAccount,
   Position,
   PortfolioHistory,
+  TradingConfig,
+  PerformanceMetric,
   fetchAccount,
-  fetchPositions,
+  fetchPositionsWithMeta,
   fetchPortfolioHistory,
+  fetchConfig,
 } from "../services/api";
 
 export default function DashboardScreen() {
   const [account, setAccount] = useState<AlpacaAccount | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
+  const [cashBalance, setCashBalance] = useState(0);
+  const [performance, setPerformance] = useState<Record<string, PerformanceMetric> | null>(null);
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
+  const [config, setConfig] = useState<TradingConfig | null>(null);
   const [chartPeriod, setChartPeriod] = useState("1W");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isAlpaca = !config || config.ACTIVE_BROKER === "alpaca";
+
   const loadData = useCallback(async () => {
     try {
       setError(null);
-      const [acct, pos, hist] = await Promise.all([
-        fetchAccount(),
-        fetchPositions(),
-        fetchPortfolioHistory(chartPeriod, chartPeriod === "1D" ? "5Min" : "1D"),
-      ]);
-      setAccount(acct);
-      setPositions(pos);
-      setHistory(hist);
+      const [cfg, posData] = await Promise.all([fetchConfig(), fetchPositionsWithMeta()]);
+      setConfig(cfg);
+      setPositions(posData.positions);
+      setCashBalance(posData.cashBalance ?? 0);
+      setPerformance(posData.performance ?? null);
+
+      const brokerIsAlpaca = cfg.ACTIVE_BROKER === "alpaca";
+      if (brokerIsAlpaca) {
+        const [acct, hist] = await Promise.all([
+          fetchAccount(),
+          fetchPortfolioHistory(chartPeriod, chartPeriod === "1D" ? "5Min" : "1D"),
+        ]);
+        setAccount(acct);
+        setHistory(hist);
+      } else {
+        setAccount(null);
+        setHistory(null);
+      }
     } catch (err: any) {
       setError(err.message || "Failed to load data");
     } finally {
@@ -70,15 +88,22 @@ export default function DashboardScreen() {
     );
   }
 
-  const equity = parseFloat(account?.equity || "0");
+  const equity = isAlpaca
+    ? parseFloat(account?.equity || "0")
+    : positions.reduce((sum, p) => sum + parseFloat(p.market_value || "0"), 0) + cashBalance;
   const lastEquity = parseFloat(account?.last_equity || "0");
-  const dayPl = equity - lastEquity;
-  const dayPlPct = lastEquity > 0 ? (dayPl / lastEquity) * 100 : 0;
+  const dayPl = isAlpaca ? equity - lastEquity : 0;
+  const dayPlPct = isAlpaca && lastEquity > 0 ? (dayPl / lastEquity) * 100 : 0;
 
   const totalUnrealizedPl = positions.reduce(
     (sum, p) => sum + parseFloat(p.unrealized_pl || "0"),
     0
   );
+  const totalCostBasis = positions.reduce(
+    (sum, p) => sum + parseFloat(p.cost_basis || "0"),
+    0
+  );
+  const totalUnrealizedPlPct = totalCostBasis > 0 ? (totalUnrealizedPl / totalCostBasis) * 100 : 0;
 
   return (
     <ScrollView
@@ -96,41 +121,94 @@ export default function DashboardScreen() {
     >
       {/* Portfolio Value */}
       <View style={styles.heroCard}>
-        <Text style={styles.heroLabel}>Portfolio Value</Text>
+        <Text style={styles.heroLabel}>{isAlpaca ? "Portfolio Value" : `Portfolio Value (${config?.ACTIVE_BROKER})`}</Text>
         <Text style={styles.heroValue}>${equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
-        <View style={styles.heroRow}>
-          <Text style={[styles.heroPl, { color: dayPl >= 0 ? "#5cb85c" : "#d9534f" }]}>
-            {dayPl >= 0 ? "+" : ""}${dayPl.toFixed(2)} ({dayPlPct >= 0 ? "+" : ""}{dayPlPct.toFixed(2)}%)
-          </Text>
-          <Text style={styles.heroSub}>Today</Text>
-        </View>
+        {isAlpaca && (
+          <View style={styles.heroRow}>
+            <Text style={[styles.heroPl, { color: dayPl >= 0 ? "#5cb85c" : "#d9534f" }]}>
+              {dayPl >= 0 ? "+" : ""}${dayPl.toFixed(4)} ({dayPlPct >= 0 ? "+" : ""}{dayPlPct.toFixed(4)}%)
+            </Text>
+            <Text style={styles.heroSub}>Today</Text>
+          </View>
+        )}
       </View>
 
-      {/* Equity Chart */}
-      <EquityChart
-        history={history}
-        period={chartPeriod}
-        onPeriodChange={(p) => {
-          setChartPeriod(p);
-          setRefreshing(true);
-          loadData();
-        }}
-      />
+      {/* Equity Chart — Alpaca only */}
+      {isAlpaca && (
+        <EquityChart
+          history={history}
+          period={chartPeriod}
+          onPeriodChange={(p) => {
+            setChartPeriod(p);
+            setRefreshing(true);
+            loadData();
+          }}
+        />
+      )}
 
       {/* Account Stats */}
       <View style={styles.statsRow}>
-        <StatCard label="Cash" value={`$${parseFloat(account?.cash || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
-        <StatCard label="Buying Power" value={`$${parseFloat(account?.buying_power || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
+        {isAlpaca ? (
+          <>
+            <StatCard label="Cash" value={`$${parseFloat(account?.cash || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
+            <StatCard label="Buying Power" value={`$${parseFloat(account?.buying_power || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} />
+          </>
+        ) : (
+          <>
+            <StatCard
+              label="Cash (USD)"
+              value={`$${cashBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+            />
+            <StatCard
+              label="Open P&L"
+              value={`${totalUnrealizedPl >= 0 ? "+" : ""}$${totalUnrealizedPl.toFixed(4)}`}
+              subValue={`${totalUnrealizedPlPct >= 0 ? "+" : ""}${totalUnrealizedPlPct.toFixed(4)}%`}
+              color={totalUnrealizedPl >= 0 ? "#5cb85c" : "#d9534f"}
+            />
+          </>
+        )}
       </View>
 
-      <View style={styles.statsRow}>
-        <StatCard
-          label="Open P&L"
-          value={`${totalUnrealizedPl >= 0 ? "+" : ""}$${totalUnrealizedPl.toFixed(2)}`}
-          color={totalUnrealizedPl >= 0 ? "#5cb85c" : "#d9534f"}
-        />
-        <StatCard label="Positions" value={String(positions.length)} />
-      </View>
+      {/* Performance Metrics — Coinbase only */}
+      {!isAlpaca && performance && (
+        <View style={styles.perfCard}>
+          <Text style={styles.perfTitle}>Realized P&L</Text>
+          <View style={styles.perfRow}>
+            {(["1d", "1w", "1m", "1y"] as const).map((period) => {
+              const metric = performance[period];
+              const pl = metric?.realizedPl ?? 0;
+              const trades = metric?.trades ?? 0;
+              return (
+                <View key={period} style={styles.perfItem}>
+                  <Text style={styles.perfPeriod}>{period.toUpperCase()}</Text>
+                  <Text style={[styles.perfValue, { color: pl >= 0 ? "#5cb85c" : "#d9534f" }]}>
+                    {pl >= 0 ? "+" : ""}${pl.toFixed(4)}
+                  </Text>
+                  <Text style={styles.perfTrades}>{trades} trade{trades !== 1 ? "s" : ""}</Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
+      {!isAlpaca && (
+        <View style={styles.statsRow}>
+          <StatCard label="Positions" value={String(positions.length)} />
+        </View>
+      )}
+
+      {isAlpaca && (
+        <View style={styles.statsRow}>
+          <StatCard
+            label="Open P&L"
+            value={`${totalUnrealizedPl >= 0 ? "+" : ""}$${totalUnrealizedPl.toFixed(4)}`}
+            subValue={`${totalUnrealizedPlPct >= 0 ? "+" : ""}${totalUnrealizedPlPct.toFixed(4)}%`}
+            color={totalUnrealizedPl >= 0 ? "#5cb85c" : "#d9534f"}
+          />
+          <StatCard label="Positions" value={String(positions.length)} />
+        </View>
+      )}
 
       {/* Active Positions Preview */}
       <Text style={styles.sectionTitle}>Active Positions</Text>
@@ -168,16 +246,19 @@ export default function DashboardScreen() {
 function StatCard({
   label,
   value,
+  subValue,
   color,
 }: {
   label: string;
   value: string;
+  subValue?: string;
   color?: string;
 }) {
   return (
     <View style={styles.statCard}>
       <Text style={styles.statLabel}>{label}</Text>
       <Text style={[styles.statValue, color ? { color } : null]}>{value}</Text>
+      {subValue ? <Text style={[styles.statSubValue, color ? { color } : null]}>{subValue}</Text> : null}
     </View>
   );
 }
@@ -343,6 +424,11 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "bold",
   },
+  statSubValue: {
+    color: "#aaa",
+    fontSize: 13,
+    marginTop: 2,
+  },
   sectionTitle: {
     color: "#fff",
     fontSize: 18,
@@ -455,5 +541,44 @@ const styles = StyleSheet.create({
   bar: {
     borderRadius: 1,
     minHeight: 2,
+  },
+  perfCard: {
+    backgroundColor: "#16213e",
+    marginHorizontal: 16,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#0f3460",
+  },
+  perfTitle: {
+    color: "#888",
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  perfRow: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+  },
+  perfItem: {
+    alignItems: "center",
+    flex: 1,
+  },
+  perfPeriod: {
+    color: "#aaa",
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  perfValue: {
+    fontSize: 15,
+    fontWeight: "bold",
+  },
+  perfTrades: {
+    color: "#666",
+    fontSize: 10,
+    marginTop: 2,
   },
 });

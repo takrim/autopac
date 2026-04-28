@@ -5,10 +5,15 @@ import { logger } from "firebase-functions/v2";
 const db = getFirestore();
 const CONFIG_DOC = db.collection("config").doc("trading");
 
+export interface BrokerSettings {
+  tradeValueUsd: number;
+  allowedSymbols: string[]; // empty = allow all
+}
+
 export interface TradingConfig {
   AUTO_APPROVE: boolean;
   PAPER_TRADING: boolean;
-  ACTIVE_BROKER: "mock" | "alpaca";
+  ACTIVE_BROKER: "mock" | "alpaca" | "coinbase";
   TRADE_VALUE_USD: number;
   STOP_LOSS_PCT: number;
   TAKE_PROFIT_PCT: number;
@@ -17,6 +22,7 @@ export interface TradingConfig {
   ORDER_PYRAMID: boolean;
   MAX_DAILY_TRADES: number;
   ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
+  brokerSettings: Record<string, BrokerSettings>;
 }
 
 const DEFAULTS: TradingConfig = {
@@ -31,6 +37,11 @@ const DEFAULTS: TradingConfig = {
   ORDER_PYRAMID: false,
   MAX_DAILY_TRADES: 50,
   ORDER_MODE: "BOTH",
+  brokerSettings: {
+    alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
+    coinbase: { tradeValueUsd: 1000, allowedSymbols: [] },
+    mock: { tradeValueUsd: 1000, allowedSymbols: [] },
+  },
 };
 
 /**
@@ -39,7 +50,26 @@ const DEFAULTS: TradingConfig = {
 export async function getTradingConfig(): Promise<TradingConfig> {
   const snap = await CONFIG_DOC.get();
   if (!snap.exists) return { ...DEFAULTS };
-  return { ...DEFAULTS, ...(snap.data() as Partial<TradingConfig>) };
+  const data = snap.data() as Partial<TradingConfig>;
+  // Deep-merge brokerSettings so individual broker entries are preserved
+  const brokerSettings = {
+    ...DEFAULTS.brokerSettings,
+    ...(data.brokerSettings || {}),
+  };
+  return { ...DEFAULTS, ...data, brokerSettings };
+}
+
+/**
+ * Get the active broker's settings (tradeValueUsd, allowedSymbols).
+ * Falls back to the global TRADE_VALUE_USD if no per-broker override exists.
+ */
+export function getActiveBrokerSettings(config: TradingConfig): BrokerSettings {
+  const broker = config.ACTIVE_BROKER;
+  const bs = config.brokerSettings?.[broker];
+  return {
+    tradeValueUsd: bs?.tradeValueUsd || config.TRADE_VALUE_USD,
+    allowedSymbols: bs?.allowedSymbols || [],
+  };
 }
 
 /**
@@ -73,6 +103,7 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "ORDER_PYRAMID",
   "MAX_DAILY_TRADES",
   "ORDER_MODE",
+  "brokerSettings",
 ];
 
 /**

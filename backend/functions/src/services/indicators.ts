@@ -16,13 +16,94 @@ export interface IndicatorResult {
   vwap: number | null;
   vwapTrend: "bullish" | "bearish" | "neutral" | null;
   currentPrice: number | null;
+  support: number | null;
+}
+
+/**
+ * Fetch candles from Coinbase public API and convert to Bar format.
+ * Tries FIVE_MINUTE first, then falls back to FIFTEEN_MINUTE for low-volume tokens.
+ */
+async function fetchCoinbaseCandles(symbol: string): Promise<Bar[]> {
+  const productId = symbol.includes("-") ? symbol : symbol.replace(/USD$/, "") + "-USD";
+  const end = Math.floor(Date.now() / 1000);
+
+  const granularities = [
+    { name: "FIVE_MINUTE", seconds: 500 * 5 * 60 },
+    { name: "FIFTEEN_MINUTE", seconds: 300 * 15 * 60 },
+  ];
+
+  for (const gran of granularities) {
+    const start = end - gran.seconds;
+    const url = `https://api.coinbase.com/api/v3/brokerage/market/products/${encodeURIComponent(productId)}/candles?start=${start}&end=${end}&granularity=${gran.name}`;
+
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      logger.warn("[INDICATORS] Coinbase candles fetch failed", { symbol, productId, granularity: gran.name, status: resp.status });
+      continue;
+    }
+
+    const data = await resp.json() as Record<string, unknown>;
+    const candles = data.candles as Array<Record<string, string>> | undefined;
+    if (!candles || candles.length < 15) {
+      logger.info("[INDICATORS] Coinbase insufficient candles at granularity", { symbol, granularity: gran.name, count: candles?.length ?? 0 });
+      continue;
+    }
+
+    logger.info("[INDICATORS] Coinbase candles found", { symbol, granularity: gran.name, count: candles.length });
+    // Coinbase candles are newest-first; reverse to oldest-first for RSI calculation
+    return candles.reverse().map((c) => ({
+      t: c.start,
+      o: parseFloat(c.open),
+      h: parseFloat(c.high),
+      l: parseFloat(c.low),
+      c: parseFloat(c.close),
+      v: parseFloat(c.volume),
+      vw: 0,
+    }));
+  }
+
+  return [];
+}
+
+/**
+ * Fetch 15-minute candles from Coinbase public API.
+ * Used specifically for support level determination.
+ */
+async function fetchCoinbase15MinCandles(symbol: string): Promise<Bar[]> {
+  const productId = symbol.includes("-") ? symbol : symbol.replace(/USD$/, "") + "-USD";
+  const end = Math.floor(Date.now() / 1000);
+  // 300 candles × 15 min = 75 hours of data
+  const start = end - 300 * 15 * 60;
+  const url = `https://api.coinbase.com/api/v3/brokerage/market/products/${encodeURIComponent(productId)}/candles?start=${start}&end=${end}&granularity=FIFTEEN_MINUTE`;
+
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    logger.warn("[INDICATORS] Coinbase 15m candles fetch failed", { symbol, productId, status: resp.status });
+    return [];
+  }
+
+  const data = await resp.json() as Record<string, unknown>;
+  const candles = data.candles as Array<Record<string, string>> | undefined;
+  if (!candles || candles.length === 0) return [];
+
+  // Coinbase returns newest-first; reverse to oldest-first
+  return candles.reverse().map((c) => ({
+    t: c.start,
+    o: parseFloat(c.open),
+    h: parseFloat(c.high),
+    l: parseFloat(c.low),
+    c: parseFloat(c.close),
+    v: parseFloat(c.volume),
+    vw: 0,
+  }));
 }
 
 /**
  * Fetch recent bars from Alpaca and calculate RSI(14) and VWAP.
+ * Falls back to Coinbase candles if Alpaca has insufficient data and activeBroker is "coinbase".
  */
-export async function calculateIndicators(symbol: string, currentPrice: number): Promise<IndicatorResult> {
-  const result: IndicatorResult = { rsi: null, vwap: null, vwapTrend: null, currentPrice };
+export async function calculateIndicators(symbol: string, currentPrice: number, activeBroker?: string): Promise<IndicatorResult> {
+  const result: IndicatorResult = { rsi: null, vwap: null, vwapTrend: null, currentPrice, support: null };
 
   try {
     const config = getAlpacaConfig();
@@ -64,8 +145,19 @@ export async function calculateIndicators(symbol: string, currentPrice: number):
       }
     }
 
+    // Fallback to Coinbase candles if Alpaca has insufficient data
+    if (bars.length < 15 && isCrypto && activeBroker === "coinbase") {
+      logger.info("[INDICATORS] Alpaca returned insufficient bars, falling back to Coinbase candles", { symbol, alpacaBars: bars.length });
+      try {
+        bars = await fetchCoinbaseCandles(symbol);
+        logger.info("[INDICATORS] Coinbase candles fetched", { symbol, count: bars.length });
+      } catch (cbErr) {
+        logger.warn("[INDICATORS] Coinbase candle fallback failed", { symbol, error: String(cbErr) });
+      }
+    }
+
     if (bars.length < 15) {
-      logger.warn("[INDICATORS] Not enough bars for indicators", { symbol, count: bars.length });
+      logger.warn("[INDICATORS] Not enough bars for indicators", { symbol, count: bars.length, source: bars.length > 0 ? "partial" : "none" });
       return result;
     }
 
@@ -86,7 +178,20 @@ export async function calculateIndicators(symbol: string, currentPrice: number):
       }
     }
 
-    logger.info("[INDICATORS] Calculated", { symbol, rsi: result.rsi?.toFixed(1), vwap: result.vwap?.toFixed(2), vwapTrend: result.vwapTrend });
+    logger.info("[INDICATORS] Calculated", { symbol, rsi: result.rsi?.toFixed(1), vwap: result.vwap?.toFixed(4), vwapTrend: result.vwapTrend });
+
+    // Calculate support level from 15-min candles (for stop loss placement)
+    if (activeBroker === "coinbase") {
+      try {
+        const bars15m = await fetchCoinbase15MinCandles(symbol);
+        if (bars15m.length >= 5) {
+          result.support = calcSupportLevel(bars15m, currentPrice);
+          logger.info("[INDICATORS] Support level", { symbol, support: result.support?.toFixed(6) ?? "none", bars: bars15m.length });
+        }
+      } catch (supErr) {
+        logger.warn("[INDICATORS] Support level calculation failed (non-fatal)", { symbol, error: String(supErr) });
+      }
+    }
   } catch (err) {
     logger.error("[INDICATORS] Error calculating indicators", { symbol, err: String(err) });
   }
@@ -124,6 +229,29 @@ function calcRSI(closes: number[], period: number): number | null {
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
+}
+
+/**
+ * Find the most recent pivot low below the current price from a bar array.
+ * A pivot low is a bar whose low is strictly less than the `wing` bars on each side.
+ * Returns the most recent such low that is below currentPrice, or null if none found.
+ */
+function calcSupportLevel(bars: Bar[], currentPrice: number, wing = 2): number | null {
+  let lastSupport: number | null = null;
+
+  for (let i = wing; i < bars.length - wing; i++) {
+    const low = bars[i].l;
+    let isPivot = true;
+    for (let j = i - wing; j <= i + wing; j++) {
+      if (j === i) continue;
+      if (bars[j].l <= low) { isPivot = false; break; }
+    }
+    if (isPivot && low < currentPrice) {
+      lastSupport = low;
+    }
+  }
+
+  return lastSupport;
 }
 
 /**

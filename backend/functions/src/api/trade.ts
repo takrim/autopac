@@ -3,7 +3,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import { TradeApprovalRequest, Signal, Decision, Order } from "../types";
 import { CONFIG } from "../config";
-import { getTradingConfig } from "./config";
+import { getTradingConfig, getActiveBrokerSettings } from "./config";
 import { getBroker } from "../brokers";
 import { runRiskChecks } from "../services/risk";
 import { logAudit } from "../services/audit";
@@ -148,9 +148,11 @@ export async function executeOrder(
   }
 
   // Place order via broker
-  const broker = getBroker();
   const tradingConfig = await getTradingConfig();
-  const quantity = tradingConfig.TRADE_VALUE_USD / signal.price;
+  const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+  const brokerSettings = getActiveBrokerSettings(tradingConfig);
+  const tradeValueUsd = brokerSettings.tradeValueUsd;
+  const quantity = tradeValueUsd / signal.price;
 
   const order: Order = {
     signalId: signal.id!,
@@ -181,6 +183,7 @@ export async function executeOrder(
       orderType: CONFIG.DEFAULT_ORDER_TYPE,
       stopLoss: signal.stopLoss || undefined,
       takeProfit: signal.takeProfit || undefined,
+      tradeValueUsd,
     });
 
     // Update order with result

@@ -1,6 +1,6 @@
 import { logger } from "firebase-functions/v2";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { IBroker } from "./interface";
+import { IBroker, BrokerPosition } from "./interface";
 import { PlaceOrderParams, PlaceOrderResult } from "../types";
 import { getAlpacaConfig, CONFIG } from "../config";
 
@@ -98,9 +98,11 @@ export class AlpacaBroker implements IBroker {
       time_in_force: isCrypto ? "gtc" : "day",
     };
 
+    const tradeValue = params.tradeValueUsd || CONFIG.TRADE_VALUE_USD;
+
     if (!isCrypto) {
       // Use the signal price as the limit price
-      const signalPrice = params.limitPrice || (CONFIG.TRADE_VALUE_USD / params.quantity);
+      const signalPrice = params.limitPrice || (tradeValue / params.quantity);
       // Add 1% slippage buffer for BUY, subtract for SELL
       const limitPrice = params.side === "BUY"
         ? (signalPrice * 1.01).toFixed(2)
@@ -111,13 +113,13 @@ export class AlpacaBroker implements IBroker {
 
     // For crypto: use notional (dollar amount) — Alpaca calculates the exact qty
     if (isCrypto) {
-      orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
+      orderBody.notional = tradeValue.toFixed(2);
     } else {
       // Alpaca: fractional orders must be "simple" (no bracket/oto).
       // Round down to whole shares so we can use bracket orders with SL/TP.
       const wholeQty = Math.floor(params.quantity);
       if (wholeQty < 1) {
-        orderBody.notional = CONFIG.TRADE_VALUE_USD.toFixed(2);
+        orderBody.notional = tradeValue.toFixed(2);
       } else {
         orderBody.qty = wholeQty.toString();
       }
@@ -296,5 +298,136 @@ export class AlpacaBroker implements IBroker {
         message: `Alpaca request failed: ${String(err)}`,
       };
     }
+  }
+
+  private toAlpacaSymbol(symbol: string): { symbol: string; isCrypto: boolean } {
+    const isCrypto = symbol.endsWith("USD") || symbol.endsWith("USDT") || symbol.includes("/");
+    const alpacaSymbol = isCrypto && !symbol.includes("/")
+      ? symbol.replace(/USDT?$/, "") + "/USD"
+      : symbol;
+    return { symbol: alpacaSymbol, isCrypto };
+  }
+
+  async getPosition(symbol: string): Promise<BrokerPosition | null> {
+    const config = this.getConfig();
+    const { symbol: alpacaSymbol } = this.toAlpacaSymbol(symbol);
+    const posSymbol = alpacaSymbol.replace("/", "");
+
+    try {
+      const resp = await fetch(
+        `${config.baseUrl}/v2/positions/${encodeURIComponent(posSymbol)}`,
+        { headers: this.getHeaders() }
+      );
+      if (!resp.ok) return null;
+
+      const data = await resp.json() as Record<string, unknown>;
+      const qty = parseFloat(data.qty as string || "0");
+      if (qty <= 0) return null;
+
+      return {
+        symbol: data.symbol as string,
+        qty,
+        currentPrice: parseFloat(data.current_price as string || "0"),
+        costBasis: parseFloat(data.cost_basis as string || "0"),
+        assetClass: data.asset_class as string,
+      };
+    } catch (err) {
+      logger.warn("[ALPACA] getPosition error", { symbol, err: String(err) });
+      return null;
+    }
+  }
+
+  async liquidatePosition(symbol: string): Promise<Record<string, unknown>> {
+    const config = this.getConfig();
+    const headers = this.getHeaders();
+    const { symbol: alpacaSymbol, isCrypto: _ } = this.toAlpacaSymbol(symbol);
+    const cryptoSymbol = alpacaSymbol;
+
+    // 1. Cancel all open orders for this symbol
+    let cancelledCount = 0;
+    try {
+      for (const sym of [symbol, cryptoSymbol]) {
+        const ordersResp = await fetch(
+          `${config.baseUrl}/v2/orders?status=open&symbols=${encodeURIComponent(sym)}&limit=100`,
+          { headers }
+        );
+        if (ordersResp.ok) {
+          const orders = (await ordersResp.json()) as Array<{ id: string }>;
+          for (const order of orders) {
+            const cancelResp = await fetch(`${config.baseUrl}/v2/orders/${order.id}`, {
+              method: "DELETE",
+              headers,
+            });
+            if (cancelResp.ok || cancelResp.status === 204) cancelledCount++;
+          }
+        }
+      }
+      if (cancelledCount > 0) {
+        logger.info("[ALPACA] Cancelled open orders", { symbol, cancelledCount });
+      }
+    } catch (cancelErr) {
+      logger.warn("[ALPACA] Error cancelling orders", { symbol, error: String(cancelErr) });
+    }
+
+    // 2. Fetch current position
+    const posSymbol = encodeURIComponent(symbol);
+    const posResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, { headers });
+    if (!posResp.ok) {
+      throw new Error(`No position found for ${symbol}`);
+    }
+    const position = (await posResp.json()) as Record<string, string>;
+    const isCrypto = (position.asset_class || "").toLowerCase() === "crypto";
+
+    const isMarketOpen = (() => {
+      const now = new Date();
+      const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const day = et.getDay();
+      if (day === 0 || day === 6) return false;
+      const mins = et.getHours() * 60 + et.getMinutes();
+      return mins >= 570 && mins < 960;
+    })();
+
+    let closeData: Record<string, unknown>;
+
+    if (!isCrypto && !isMarketOpen) {
+      const currentPrice = parseFloat(position.current_price || "0");
+      const limitPrice = (currentPrice * 0.98).toFixed(2);
+      const orderResp = await fetch(`${config.baseUrl}/v2/orders`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol,
+          qty: position.qty,
+          side: "sell",
+          type: "limit",
+          limit_price: limitPrice,
+          time_in_force: "day",
+          extended_hours: true,
+        }),
+      });
+
+      if (!orderResp.ok) {
+        let errMsg = await orderResp.text();
+        try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
+        throw new Error(`Extended hours liquidation failed: ${errMsg}`);
+      }
+      closeData = (await orderResp.json()) as Record<string, unknown>;
+      logger.info("[ALPACA] Extended hours limit sell placed", { symbol, qty: position.qty, limitPrice });
+    } else {
+      const closeResp = await fetch(`${config.baseUrl}/v2/positions/${posSymbol}`, {
+        method: "DELETE",
+        headers,
+      });
+
+      if (!closeResp.ok) {
+        let errMsg = await closeResp.text();
+        try { const j = JSON.parse(errMsg); if (j.message) errMsg = j.message; } catch {}
+        throw new Error(`Liquidation failed: ${errMsg}`);
+      }
+      closeData = (await closeResp.json()) as Record<string, unknown>;
+    }
+
+    logger.info("[ALPACA] Position liquidated", { symbol, cancelledOrders: cancelledCount });
+    return closeData;
   }
 }

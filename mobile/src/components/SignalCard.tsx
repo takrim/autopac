@@ -39,7 +39,7 @@ export default function SignalCard({ signal, onPress }: Props) {
       </View>
 
       <View style={styles.details}>
-        <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
+        <Text style={styles.price}>@ ${signal.price.toFixed(4)}</Text>
         <View style={styles.indicatorRow}>
           <Text style={styles.strategy}>{signal.strategy}</Text>
           {signal.rsi != null && (

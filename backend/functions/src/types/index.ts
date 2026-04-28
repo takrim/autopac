@@ -33,6 +33,7 @@ export interface Signal {
   bulltrendPrice?: number;
   bulltrendVolume?: number;
   bulltrendTime?: string;
+  broker?: string;
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 }
@@ -104,6 +105,7 @@ export interface PlaceOrderParams {
   limitPrice?: number;
   stopLoss?: number;
   takeProfit?: number;
+  tradeValueUsd?: number;
 }
 
 export interface PlaceOrderResult {

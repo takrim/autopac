@@ -15,12 +15,7 @@ import {
   rejectSignal,
 } from "../services/api";
 
-interface Props {
-  route: { params: { signalId: string } };
-  navigation: any;
-}
-
-export default function SignalDetailScreen({ route, navigation }: Props) {
+export default function SignalDetailScreen({ route, navigation }: any) {
   const { signalId } = route.params;
   const [signal, setSignal] = useState<Signal | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,7 +39,7 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
   const handleApprove = () => {
     Alert.alert(
       "Confirm Trade",
-      `Execute ${signal?.action} ${signal?.symbol} @ $${signal?.price.toFixed(2)}?`,
+      `Execute ${signal?.action} ${signal?.symbol} @ $${signal?.price.toFixed(4)}?`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -116,7 +111,7 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           {signal.action}
         </Text>
         <Text style={styles.symbol}>{signal.symbol}</Text>
-        <Text style={styles.price}>@ ${signal.price.toFixed(2)}</Text>
+        <Text style={styles.price}>@ ${signal.price.toFixed(4)}</Text>
       </View>
 
       {/* Status */}
@@ -137,11 +132,11 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
         <DetailRow label="Timeframe" value={signal.timeframe} />
         <DetailRow
           label="Stop Loss"
-          value={signal.stopLoss ? `$${signal.stopLoss.toFixed(2)}` : "—"}
+          value={signal.stopLoss ? `$${signal.stopLoss.toFixed(4)}` : "—"}
         />
         <DetailRow
           label="Take Profit"
-          value={signal.takeProfit ? `$${signal.takeProfit.toFixed(2)}` : "—"}
+          value={signal.takeProfit ? `$${signal.takeProfit.toFixed(4)}` : "—"}
         />
         <DetailRow
           label="Trend Confirm"
@@ -167,7 +162,7 @@ export default function SignalDetailScreen({ route, navigation }: Props) {
           label="VWAP"
           value={
             signal.vwapPrice
-              ? `$${signal.vwapPrice.toFixed(2)} — ${signal.vwapTrend === "bullish" ? "Price Above" : signal.vwapTrend === "bearish" ? "Price Below" : "At VWAP"}`
+              ? `$${signal.vwapPrice.toFixed(4)} — ${signal.vwapTrend === "bullish" ? "Price Above" : signal.vwapTrend === "bearish" ? "Price Below" : "At VWAP"}`
               : "Calculating…"
           }
           valueColor={

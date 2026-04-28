@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { logger } from "firebase-functions/v2";
-import { IBroker } from "./interface";
+import { IBroker, BrokerPosition } from "./interface";
 import { PlaceOrderParams, PlaceOrderResult } from "../types";
 
 /**
@@ -52,5 +52,15 @@ export class MockBroker implements IBroker {
         error: "SIMULATED_FAILURE",
       },
     };
+  }
+
+  async getPosition(_symbol: string): Promise<BrokerPosition | null> {
+    return null;
+  }
+
+  async liquidatePosition(symbol: string): Promise<Record<string, unknown>> {
+    logger.info("[MOCK_BROKER] Liquidating position", { symbol });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return { status: "liquidated", symbol, broker: "mock", simulatedAt: new Date().toISOString() };
   }
 }

@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import { getFirestore } from "firebase-admin/firestore";
+import { logger } from "firebase-functions/v2";
+import { getTradingConfig, getActiveBrokerSettings } from "./config";
 
 const db = getFirestore();
 
@@ -17,21 +19,37 @@ export async function handleListSignals(req: Request, res: Response): Promise<vo
   const status = req.query.status as string | undefined;
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
 
-  let query = db.collection("signals").orderBy("createdAt", "desc").limit(limit);
+  try {
+    const tradingConfig = await getTradingConfig();
+    const brokerSettings = getActiveBrokerSettings(tradingConfig);
+    let query = db.collection("signals")
+      .where("broker", "==", tradingConfig.ACTIVE_BROKER)
+      .orderBy("createdAt", "desc")
+      .limit(limit);
 
-  if (status) {
-    const validStatuses = ["PENDING", "APPROVED", "REJECTED", "EXECUTED", "FAILED"];
-    if (!validStatuses.includes(status.toUpperCase())) {
-      res.status(400).json({ error: "Invalid status filter" });
-      return;
+    if (status) {
+      const validStatuses = ["PENDING", "APPROVED", "REJECTED", "EXECUTED", "FAILED"];
+      if (!validStatuses.includes(status.toUpperCase())) {
+        res.status(400).json({ error: "Invalid status filter" });
+        return;
+      }
+      query = query.where("status", "==", status.toUpperCase());
     }
-    query = query.where("status", "==", status.toUpperCase());
+
+    const snapshot = await query.get();
+    let signals = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    // Filter to allowlist symbols if configured
+    if (brokerSettings.allowedSymbols.length > 0) {
+      const allowed = new Set(brokerSettings.allowedSymbols);
+      signals = signals.filter((s: any) => allowed.has(s.symbol));
+    }
+
+    res.json({ signals });
+  } catch (err) {
+    logger.error("[API] List signals error", { error: String(err) });
+    res.status(500).json({ error: String(err) });
   }
-
-  const snapshot = await query.get();
-  const signals = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
-  res.json({ signals });
 }
 
 /**
@@ -71,13 +89,22 @@ export async function handleListOrders(req: Request, res: Response): Promise<voi
 
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
 
+  const tradingConfig = await getTradingConfig();
+  const brokerSettings = getActiveBrokerSettings(tradingConfig);
   const snapshot = await db
     .collection("orders")
+    .where("broker", "==", tradingConfig.ACTIVE_BROKER)
     .orderBy("createdAt", "desc")
     .limit(limit)
     .get();
 
-  const orders = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  let orders = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+  // Filter to allowlist symbols if configured
+  if (brokerSettings.allowedSymbols.length > 0) {
+    const allowed = new Set(brokerSettings.allowedSymbols);
+    orders = orders.filter((o: any) => allowed.has(o.symbol));
+  }
 
   res.json({ orders });
 }
@@ -174,7 +201,13 @@ export async function handleListDecisions(req: Request, res: Response): Promise<
   const decision = req.query.decision as string | undefined;
   const handler = req.query.handler as string | undefined;
 
-  let query: any = db.collection("signal_decisions").orderBy("createdAt", "desc").limit(limit);
+  const tradingConfig = await getTradingConfig();
+  const brokerSettings = getActiveBrokerSettings(tradingConfig);
+
+  let query: any = db.collection("signal_decisions")
+    .where("broker", "==", tradingConfig.ACTIVE_BROKER)
+    .orderBy("createdAt", "desc")
+    .limit(limit);
 
   if (symbol) {
     query = query.where("symbol", "==", symbol.toUpperCase());
@@ -187,7 +220,13 @@ export async function handleListDecisions(req: Request, res: Response): Promise<
   }
 
   const snapshot = await query.get();
-  const decisions = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
+  let decisions = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
+
+  // Filter to allowlist symbols if configured
+  if (brokerSettings.allowedSymbols.length > 0) {
+    const allowed = new Set(brokerSettings.allowedSymbols);
+    decisions = decisions.filter((d: any) => allowed.has(d.symbol));
+  }
 
   res.json({ decisions });
 }
