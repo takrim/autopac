@@ -8,6 +8,10 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Dimensions,
+  Modal,
+  FlatList,
+  SafeAreaView,
+  Pressable,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import {
@@ -16,6 +20,7 @@ import {
   PortfolioHistory,
   TradingConfig,
   PerformanceMetric,
+  TradeDetail,
   fetchAccount,
   fetchPositionsWithMeta,
   fetchPortfolioHistory,
@@ -30,9 +35,12 @@ export default function DashboardScreen() {
   const [history, setHistory] = useState<PortfolioHistory | null>(null);
   const [config, setConfig] = useState<TradingConfig | null>(null);
   const [chartPeriod, setChartPeriod] = useState("1W");
+  const [showAllPositions, setShowAllPositions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedPeriod, setSelectedPeriod] = useState<string | null>(null);
+  const [symbolFilter, setSymbolFilter] = useState<string>("ALL");
 
   const isAlpaca = !config || config.ACTIVE_BROKER === "alpaca";
 
@@ -121,7 +129,7 @@ export default function DashboardScreen() {
     >
       {/* Portfolio Value */}
       <View style={styles.heroCard}>
-        <Text style={styles.heroLabel}>{isAlpaca ? "Portfolio Value" : `Portfolio Value (${config?.ACTIVE_BROKER})`}</Text>
+        <Text style={styles.heroLabel}>{isAlpaca ? "Stocks Portfolio" : "Crypto Portfolio"}</Text>
         <Text style={styles.heroValue}>${equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
         {isAlpaca && (
           <View style={styles.heroRow}>
@@ -179,18 +187,115 @@ export default function DashboardScreen() {
               const pl = metric?.realizedPl ?? 0;
               const trades = metric?.trades ?? 0;
               return (
-                <View key={period} style={styles.perfItem}>
+                <TouchableOpacity
+                  key={period}
+                  style={styles.perfItem}
+                  onPress={() => { setSymbolFilter("ALL"); setSelectedPeriod(period); }}
+                  activeOpacity={0.7}
+                >
                   <Text style={styles.perfPeriod}>{period.toUpperCase()}</Text>
                   <Text style={[styles.perfValue, { color: pl >= 0 ? "#5cb85c" : "#d9534f" }]}>
                     {pl >= 0 ? "+" : ""}${pl.toFixed(4)}
                   </Text>
                   <Text style={styles.perfTrades}>{trades} trade{trades !== 1 ? "s" : ""}</Text>
-                </View>
+                </TouchableOpacity>
               );
             })}
           </View>
         </View>
       )}
+
+      {/* Trades Detail Modal */}
+      <Modal
+        visible={selectedPeriod !== null}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setSelectedPeriod(null)}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          {(() => {
+            const metric = selectedPeriod ? performance?.[selectedPeriod] : null;
+            const allTrades: TradeDetail[] = (metric?.tradeDetails ?? []).slice().sort((a, b) => b.time - a.time);
+            const symbols = ["ALL", ...Array.from(new Set(allTrades.map(t => t.symbol))).sort()];
+            const filtered = symbolFilter === "ALL" ? allTrades : allTrades.filter(t => t.symbol === symbolFilter);
+            const filteredSum = filtered.reduce((s, t) => s + t.realizedPl, 0);
+            return (
+              <>
+                {/* Header */}
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>
+                    {selectedPeriod?.toUpperCase()} Trades
+                  </Text>
+                  <TouchableOpacity onPress={() => setSelectedPeriod(null)}>
+                    <Text style={styles.modalClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Symbol filter chips */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.filterScroll}
+                  contentContainerStyle={styles.filterRow}
+                >
+                  {symbols.map(sym => (
+                    <TouchableOpacity
+                      key={sym}
+                      style={[styles.filterChip, symbolFilter === sym && styles.filterChipActive]}
+                      onPress={() => setSymbolFilter(sym)}
+                    >
+                      <Text style={[styles.filterChipText, symbolFilter === sym && styles.filterChipTextActive]}>
+                        {sym}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                {/* Trade list */}
+                <FlatList
+                  data={filtered}
+                  keyExtractor={(_, i) => String(i)}
+                  renderItem={({ item }) => {
+                    const date = new Date(item.time);
+                    const dateStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours().toString().padStart(2,"0")}:${date.getMinutes().toString().padStart(2,"0")}`;
+                    return (
+                      <View style={styles.tradeRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.tradeSymbol}>{item.symbol}</Text>
+                          <Text style={styles.tradeDate}>{dateStr}</Text>
+                        </View>
+                        <View style={{ alignItems: "flex-end" }}>
+                          <Text style={[styles.tradePl, { color: item.realizedPl >= 0 ? "#5cb85c" : "#d9534f" }]}>
+                            {item.realizedPl >= 0 ? "+" : ""}${item.realizedPl.toFixed(4)}
+                          </Text>
+                          <Text style={styles.tradeDetail}>
+                            {item.qty.toFixed(6)} @ ${item.sellPrice.toFixed(4)}
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  }}
+                  ItemSeparatorComponent={() => <View style={styles.tradeSeparator} />}
+                  ListEmptyComponent={
+                    <View style={styles.modalEmpty}>
+                      <Text style={styles.modalEmptyText}>No trades for this period</Text>
+                    </View>
+                  }
+                  contentContainerStyle={{ paddingBottom: 16 }}
+                />
+
+                {/* Footer sum */}
+                <View style={styles.modalFooter}>
+                  <Text style={styles.modalFooterLabel}>{filtered.length} trade{filtered.length !== 1 ? "s" : ""} · Total</Text>
+                  <Text style={[styles.modalFooterPl, { color: filteredSum >= 0 ? "#5cb85c" : "#d9534f" }]}>
+                    {filteredSum >= 0 ? "+" : ""}${filteredSum.toFixed(4)}
+                  </Text>
+                </View>
+              </>
+            );
+          })()}
+        </SafeAreaView>
+      </Modal>
 
       {!isAlpaca && (
         <View style={styles.statsRow}>
@@ -211,13 +316,22 @@ export default function DashboardScreen() {
       )}
 
       {/* Active Positions Preview */}
-      <Text style={styles.sectionTitle}>Active Positions</Text>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <Text style={styles.sectionTitle}>Active Positions</Text>
+        {positions.some(p => parseFloat(p.unrealized_pl || "0") < 0) && (
+          <TouchableOpacity onPress={() => setShowAllPositions(v => !v)}>
+            <Text style={{ color: "#e94560", fontSize: 13 }}>{showAllPositions ? "Winning only" : "Show all"}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
       {positions.length === 0 ? (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyText}>No open positions</Text>
         </View>
       ) : (
-        positions.map((pos) => {
+        positions
+          .filter(pos => showAllPositions || parseFloat(pos.unrealized_pl || "0") >= 0)
+          .map((pos) => {
           const pl = parseFloat(pos.unrealized_pl || "0");
           const plPct = parseFloat(pos.unrealized_plpc || "0") * 100;
           return (
@@ -580,5 +694,116 @@ const styles = StyleSheet.create({
     color: "#666",
     fontSize: 10,
     marginTop: 2,
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: "#1a1a2e",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "#0f3460",
+  },
+  modalTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  modalClose: {
+    color: "#888",
+    fontSize: 20,
+    paddingLeft: 16,
+  },
+  filterScroll: {
+    maxHeight: 44,
+    borderBottomWidth: 1,
+    borderBottomColor: "#0f3460",
+  },
+  filterRow: {
+    flexDirection: "row",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 8,
+    alignItems: "center",
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 16,
+    backgroundColor: "#16213e",
+    borderWidth: 1,
+    borderColor: "#0f3460",
+  },
+  filterChipActive: {
+    backgroundColor: "#0f3460",
+    borderColor: "#e94560",
+  },
+  filterChipText: {
+    color: "#888",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  filterChipTextActive: {
+    color: "#e94560",
+  },
+  tradeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+  },
+  tradeSymbol: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  tradeDate: {
+    color: "#666",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  tradePl: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  tradeDetail: {
+    color: "#666",
+    fontSize: 11,
+    marginTop: 2,
+  },
+  tradeSeparator: {
+    height: 1,
+    backgroundColor: "#0f3460",
+    marginHorizontal: 20,
+  },
+  modalEmpty: {
+    alignItems: "center",
+    paddingVertical: 40,
+  },
+  modalEmptyText: {
+    color: "#666",
+    fontSize: 14,
+  },
+  modalFooter: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#0f3460",
+    backgroundColor: "#16213e",
+  },
+  modalFooterLabel: {
+    color: "#888",
+    fontSize: 13,
+  },
+  modalFooterPl: {
+    fontSize: 17,
+    fontWeight: "700",
   },
 });

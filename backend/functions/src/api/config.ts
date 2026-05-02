@@ -22,6 +22,7 @@ export interface TradingConfig {
   ORDER_PYRAMID: boolean;
   MAX_DAILY_TRADES: number;
   ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
+  PNL_RESET_DATE: number | null; // epoch ms — ignore fills before this timestamp
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -37,6 +38,7 @@ const DEFAULTS: TradingConfig = {
   ORDER_PYRAMID: false,
   MAX_DAILY_TRADES: 50,
   ORDER_MODE: "BOTH",
+  PNL_RESET_DATE: null,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 1000, allowedSymbols: [] },
@@ -65,6 +67,55 @@ export async function getTradingConfig(): Promise<TradingConfig> {
  */
 export function getActiveBrokerSettings(config: TradingConfig): BrokerSettings {
   const broker = config.ACTIVE_BROKER;
+  const bs = config.brokerSettings?.[broker];
+  return {
+    tradeValueUsd: bs?.tradeValueUsd || config.TRADE_VALUE_USD,
+    allowedSymbols: bs?.allowedSymbols || [],
+  };
+}
+
+/**
+ * Returns true if the symbol looks like a crypto pair (ends in USD/USDC/USDT).
+ */
+function isCryptoSymbol(symbol: string): boolean {
+  return /USD[CT]?$/i.test(symbol);
+}
+
+/**
+ * Resolve which broker should handle a given symbol, independent of ACTIVE_BROKER.
+ *
+ * Rules:
+ *   1. Explicit allowlist match always wins (checked for both brokers).
+ *   2. If no explicit match:
+ *      - Crypto symbols (ends in USD/USDC/USDT) → must have been in Coinbase allowlist → reject.
+ *      - Stock symbols → Alpaca catch-all only if Alpaca allowlist is empty.
+ *   3. If no broker can handle it → returns null (webhook rejects the signal).
+ */
+export function getBrokerForSymbol(
+  config: TradingConfig,
+  symbol: string
+): "mock" | "alpaca" | "coinbase" | null {
+  const alpacaSymbols = config.brokerSettings?.alpaca?.allowedSymbols || [];
+  const coinbaseSymbols = config.brokerSettings?.coinbase?.allowedSymbols || [];
+
+  // Explicit match
+  if (alpacaSymbols.length > 0 && alpacaSymbols.includes(symbol)) return "alpaca";
+  if (coinbaseSymbols.length > 0 && coinbaseSymbols.includes(symbol)) return "coinbase";
+
+  // No explicit match — crypto symbols must be explicitly listed in Coinbase
+  if (isCryptoSymbol(symbol)) return null;
+
+  // Stock symbol — use Alpaca if its allowlist is empty (catch-all for stocks)
+  if (alpacaSymbols.length === 0) return "alpaca";
+
+  // Alpaca has a non-empty allowlist but this symbol isn't in it
+  return null;
+}
+
+/**
+ * Get settings for a specific broker by name.
+ */
+export function getBrokerSettings(config: TradingConfig, broker: string): BrokerSettings {
   const bs = config.brokerSettings?.[broker];
   return {
     tradeValueUsd: bs?.tradeValueUsd || config.TRADE_VALUE_USD,

@@ -310,7 +310,29 @@ export class CoinbaseBroker implements IBroker {
   async updateStopLoss(symbol: string, newStopPrice: number): Promise<{ success: boolean; orderId?: string; message: string }> {
     const productId = this.toProductId(symbol);
 
-    // 1. Cancel all existing SELL stop-limit orders for this product
+    // 1. Query position directly via accounts API
+    logger.info("[COINBASE] updateStopLoss: querying position", { symbol, productId, newStopPrice });
+    const { ok: acctOk, data: acctData } = await this.request("GET", "/accounts?limit=250");
+    logger.info("[COINBASE] updateStopLoss: accounts response", { ok: acctOk, keys: Object.keys(acctData) });
+    if (!acctOk) {
+      return { success: false, message: `Coinbase accounts API failed for ${symbol}` };
+    }
+    const accounts = acctData.accounts as Array<Record<string, unknown>> | undefined;
+    const baseCurrency = productId.split("-")[0];
+    const acct = (accounts || []).find((a) => (a.currency as string) === baseCurrency);
+    if (!acct) {
+      logger.warn("[COINBASE] updateStopLoss: no account for currency", { baseCurrency, total: (accounts || []).length });
+      return { success: false, message: `No open position for ${symbol}` };
+    }
+    const available = parseFloat(((acct.available_balance as Record<string, string>) || {}).value || "0");
+    const held = parseFloat(((acct.hold as Record<string, string>) || {}).value || "0");
+    const posQty = available + held;
+    logger.info("[COINBASE] updateStopLoss: found account", { baseCurrency, available, held, posQty });
+    if (posQty <= 0) {
+      return { success: false, message: `No open position for ${symbol}` };
+    }
+
+    // 2. Cancel all existing SELL stop-limit orders for this product
     try {
       const { ok, data } = await this.request("GET", `/orders/historical/batch?product_id=${productId}&order_status=OPEN&limit=100`);
       if (ok) {
@@ -324,49 +346,146 @@ export class CoinbaseBroker implements IBroker {
           await this.request("POST", "/orders/batch_cancel", { order_ids: ids });
           logger.info("[COINBASE] Cancelled existing SL orders", { productId, count: ids.length });
           // Brief pause to let balance release
-          await new Promise((r) => setTimeout(r, 800));
+          await new Promise((r) => setTimeout(r, 1200));
         }
       }
     } catch (cancelErr) {
       logger.warn("[COINBASE] updateStopLoss: cancel error (non-fatal)", { productId, error: String(cancelErr) });
     }
 
-    // 2. Get current held quantity
-    const position = await this.getPosition(symbol);
-    if (!position || position.qty <= 0) {
-      return { success: false, message: `No open position for ${symbol}` };
+    // 3. Place new stop-limit order using product's quote_increment for correct precision
+    const extractError = (data: Record<string, unknown>): string => {
+      const errResp = data.error_response as Record<string, unknown> | undefined;
+      return (
+        (errResp?.message as string) ||
+        (errResp?.error_details as string) ||
+        (errResp?.preview_failure_reason as string) ||
+        (errResp?.new_order_failure_reason as string) ||
+        (data.message as string) ||
+        (data.failure_reason as string) ||
+        (data.error as string) ||
+        "unknown error"
+      );
+    };
+
+    const isDecimalError = (msg: string) =>
+      /decimal|precision|invalid.*number|too many|increment/i.test(msg);
+
+    // Format base_size: trim float noise, max 8 decimal places then strip trailing zeros
+    const formatQty = (qty: number): string => {
+      const s = qty.toFixed(8);
+      return s.replace(/\.?0+$/, "") || "0";
+    };
+
+    // Round a number to match a quote_increment string like "0.01" or "0.001"
+    const roundToIncrement = (value: number, increment: string): string => {
+      const parts = increment.split(".");
+      const decimals = parts.length > 1 ? parts[1].length : 0;
+      // Round to nearest increment
+      const factor = Math.pow(10, decimals);
+      const rounded = Math.round(value * factor) / factor;
+      return rounded.toFixed(decimals);
+    };
+
+    // Fetch product info to get quote_increment (price tick size)
+    let quoteIncrement = "0.01"; // fallback
+    try {
+      const { ok: prodOk, data: prodData } = await this.request("GET", `/products/${productId}`);
+      if (prodOk && prodData.quote_increment) {
+        quoteIncrement = prodData.quote_increment as string;
+        logger.info("[COINBASE] updateStopLoss: product info", { productId, quoteIncrement });
+      }
+    } catch {
+      logger.warn("[COINBASE] updateStopLoss: could not fetch product info, using default increment", { productId });
     }
 
-    // 3. Place new stop-limit order
-    const limitPrice = (newStopPrice * 0.99).toFixed(4);
+    const stopStr = roundToIncrement(newStopPrice, quoteIncrement);
+    // Limit price: 1% below stop, also rounded to quote increment
+    const limitStr = roundToIncrement(newStopPrice * 0.99, quoteIncrement);
+    logger.info("[COINBASE] updateStopLoss: placing order", { productId, qty: formatQty(posQty), stopStr, limitStr, quoteIncrement });
+
     const slBody: Record<string, unknown> = {
       client_order_id: crypto.randomUUID(),
       product_id: productId,
       side: "SELL",
       order_configuration: {
         stop_limit_stop_limit_gtc: {
-          base_size: position.qty.toString(),
-          limit_price: limitPrice,
-          stop_price: newStopPrice.toFixed(4),
+          base_size: formatQty(posQty),
+          limit_price: limitStr,
+          stop_price: stopStr,
           stop_direction: "STOP_DIRECTION_STOP_DOWN",
         },
       },
     };
 
     try {
-      const { ok, data } = await this.request("POST", "/orders", slBody);
-      if (!ok || data.success === false) {
-        const errResp = data.error_response as Record<string, unknown> | undefined;
-        const msg = (errResp?.message || errResp?.error_details || "unknown error") as string;
-        logger.error("[COINBASE] updateStopLoss: new SL order failed", { productId, data });
-        return { success: false, message: `Failed to place new stop loss: ${msg}` };
+      let lastMsg = "unknown error";
+      let lastRaw = "";
+      // Try with computed precision, then fall back through decreasing precision
+      const decimals = quoteIncrement.includes(".") ? quoteIncrement.split(".")[1].length : 0;
+      const decimalSequence = [...new Set([decimals, Math.max(0, decimals - 1), 2, 1, 0])];
+      for (const d of decimalSequence) {
+        const sStr = newStopPrice.toFixed(d);
+        const lStr = (newStopPrice * 0.99).toFixed(d);
+        const body = {
+          ...slBody,
+          client_order_id: crypto.randomUUID(),
+          order_configuration: {
+            stop_limit_stop_limit_gtc: {
+              base_size: formatQty(posQty),
+              limit_price: lStr,
+              stop_price: sStr,
+              stop_direction: "STOP_DIRECTION_STOP_DOWN",
+            },
+          },
+        };
+        const { ok, data } = await this.request("POST", "/orders", body);
+        if (ok && data.success !== false) {
+          const slResp = data.success_response as Record<string, unknown> | undefined;
+          const orderId = slResp?.order_id as string | undefined;
+          logger.info("[COINBASE] updateStopLoss: SL order placed", { productId, orderId, stopPrice: newStopPrice, d, sStr });
+          return { success: true, orderId, message: `Stop loss updated to $${sStr}` };
+        }
+        lastMsg = extractError(data);
+        lastRaw = JSON.stringify(data).slice(0, 500);
+        logger.warn("[COINBASE] updateStopLoss: order attempt failed", { productId, d, sStr, lStr, lastMsg });
+        if (!isDecimalError(lastMsg)) {
+          // Non-precision error — no point retrying with different decimals
+          logger.error("[COINBASE] updateStopLoss: non-recoverable order error", { productId, lastMsg });
+          await getFirestore().collection("broker_errors").add({
+            broker: "coinbase",
+            action: "updateStopLoss",
+            symbol,
+            stopPrice: newStopPrice,
+            error: `Failed: ${lastMsg}`,
+            raw: lastRaw,
+            timestamp: FieldValue.serverTimestamp(),
+          });
+          return { success: false, message: `Failed to place new stop loss: ${lastMsg}` };
+        }
       }
-      const slResp = data.success_response as Record<string, unknown> | undefined;
-      const orderId = slResp?.order_id as string | undefined;
-      logger.info("[COINBASE] updateStopLoss: SL order placed", { productId, orderId, stopPrice: newStopPrice });
-      return { success: true, orderId, message: `Stop loss updated to $${newStopPrice.toFixed(4)}` };
+      // All decimal attempts exhausted
+      logger.error("[COINBASE] updateStopLoss: failed after all decimal retries", { productId, lastMsg });
+      await getFirestore().collection("broker_errors").add({
+        broker: "coinbase",
+        action: "updateStopLoss",
+        symbol,
+        stopPrice: newStopPrice,
+        error: `Failed after decimal retries: ${lastMsg}`,
+        raw: lastRaw,
+        timestamp: FieldValue.serverTimestamp(),
+      });
+      return { success: false, message: `Failed to place new stop loss: ${lastMsg}` };
     } catch (err) {
       logger.error("[COINBASE] updateStopLoss error", { err: String(err) });
+      await getFirestore().collection("broker_errors").add({
+        broker: "coinbase",
+        action: "updateStopLoss",
+        symbol,
+        stopPrice: newStopPrice,
+        error: String(err),
+        timestamp: FieldValue.serverTimestamp(),
+      });
       return { success: false, message: `Error: ${String(err)}` };
     }
   }
@@ -643,20 +762,17 @@ export class CoinbaseBroker implements IBroker {
    * Returns realized P&L for 1d, 1w, 1m, 1y windows.
    */
   async getPerformanceMetrics(): Promise<Record<string, unknown>> {
-    // Calendar-aligned UTC windows (start of today, this week, this month, this year)
-    const now = new Date();
-    const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-    // ISO week: Monday = 0. getUTCDay() returns 0=Sun → shift so Mon=0
-    const dayOfWeek = (now.getUTCDay() + 6) % 7;
-    const weekStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - dayOfWeek);
-    const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-    const yearStart = Date.UTC(now.getUTCFullYear(), 0, 1);
+    // Rolling windows: last 24h, 7d, 30d, 365d from now
+    const nowMs = Date.now();
     const windows = {
-      "1d": todayStart,
-      "1w": weekStart,
-      "1m": monthStart,
-      "1y": yearStart,
+      "1d": nowMs - 24 * 60 * 60 * 1000,
+      "1w": nowMs - 7 * 24 * 60 * 60 * 1000,
+      "1m": nowMs - 30 * 24 * 60 * 60 * 1000,
+      "1y": nowMs - 365 * 24 * 60 * 60 * 1000,
     };
+
+    // PNL_RESET_DATE: ignore any fills before May 2, 2026 00:00:00 UTC
+    const pnlResetDate = 1777680000000;
 
     // Fetch all fills (up to 1000 via pagination)
     const allFills: Array<Record<string, unknown>> = [];
@@ -674,11 +790,25 @@ export class CoinbaseBroker implements IBroker {
 
     // Group fills by product into buy/sell pairs per window
     // Track realized P&L: for each SELL, find corresponding BUY cost
-    const result: Record<string, { realizedPl: number; trades: number }> = {
-      "1d": { realizedPl: 0, trades: 0 },
-      "1w": { realizedPl: 0, trades: 0 },
-      "1m": { realizedPl: 0, trades: 0 },
-      "1y": { realizedPl: 0, trades: 0 },
+    const result: Record<string, { realizedPl: number; trades: number; tradeDetails: Array<{ symbol: string; time: number; qty: number; sellPrice: number; realizedPl: number }> }> = {
+      "1d": { realizedPl: 0, trades: 0, tradeDetails: [] },
+      "1w": { realizedPl: 0, trades: 0, tradeDetails: [] },
+      "1m": { realizedPl: 0, trades: 0, tradeDetails: [] },
+      "1y": { realizedPl: 0, trades: 0, tradeDetails: [] },
+    };
+
+    // Exclusive window cutoffs (for debugging: what each period contributed independently)
+    const exclusiveCutoffs = {
+      "1d_only": { from: nowMs - 24 * 60 * 60 * 1000, to: nowMs },
+      "1d_to_1w": { from: nowMs - 7 * 24 * 60 * 60 * 1000, to: nowMs - 24 * 60 * 60 * 1000 },
+      "1w_to_1m": { from: nowMs - 30 * 24 * 60 * 60 * 1000, to: nowMs - 7 * 24 * 60 * 60 * 1000 },
+      "1m_to_1y": { from: nowMs - 365 * 24 * 60 * 60 * 1000, to: nowMs - 30 * 24 * 60 * 60 * 1000 },
+    };
+    const exclusive: Record<string, { realizedPl: number; trades: number }> = {
+      "1d_only": { realizedPl: 0, trades: 0 },
+      "1d_to_1w": { realizedPl: 0, trades: 0 },
+      "1w_to_1m": { realizedPl: 0, trades: 0 },
+      "1m_to_1y": { realizedPl: 0, trades: 0 },
     };
 
     // Group sells by product within each window
@@ -695,8 +825,9 @@ export class CoinbaseBroker implements IBroker {
       const time = new Date(timeStr).getTime();
       const sizeInQuote = fill.size_in_quote as boolean | undefined;
 
-      // Market buy fills placed with quote_size have size in quote currency (USD).
-      // Convert to base currency for consistent FIFO matching.
+      // Skip fills before the reset date
+      if (time < pnlResetDate) continue;
+
       if (sizeInQuote && price > 0) {
         qty = qty / price;
       }
@@ -710,43 +841,82 @@ export class CoinbaseBroker implements IBroker {
       }
     }
 
-    // For each product's sells, match against buys (FIFO — oldest buy first) to get realized P&L
+    // Also collect pre-reset buys (for FIFO cost basis) — but mark them so
+    // their cost is treated as the sell price (P&L contribution = 0)
+    const preBuys: Record<string, Array<{ qty: number; price: number; fee: number; time: number; preReset: boolean }>> = {};
+    const postBuys: Record<string, Array<{ qty: number; price: number; fee: number; time: number; preReset: boolean }>> = {};
+    for (const [productId, buys] of Object.entries(buysByProduct)) {
+      postBuys[productId] = buys.map(b => ({ ...b, preReset: false }));
+    }
+    // Re-scan fills for pre-reset buys
+    for (const fill of allFills) {
+      const side = fill.side as string;
+      if (side !== "BUY") continue;
+      const productId = fill.product_id as string;
+      let qty = parseFloat((fill.size as string) || "0");
+      const price = parseFloat((fill.price as string) || "0");
+      const fee = parseFloat((fill.commission as string) || "0");
+      const timeStr = fill.trade_time as string;
+      const time = new Date(timeStr).getTime();
+      const sizeInQuote = fill.size_in_quote as boolean | undefined;
+      if (time >= pnlResetDate) continue; // skip post-reset (already in postBuys)
+      if (sizeInQuote && price > 0) qty = qty / price;
+      if (!preBuys[productId]) preBuys[productId] = [];
+      preBuys[productId].push({ qty, price, fee, time, preReset: true });
+    }
+
+    // FIFO-match all sells against buys once, then assign each sell's realized P&L
+    // to every time window the sell falls within.
     for (const productId of Object.keys(sellsByProduct)) {
-      // Sort chronologically (oldest first) for proper FIFO matching
       const sells = sellsByProduct[productId].sort((a, b) => a.time - b.time);
-      const buys = (buysByProduct[productId] || []).sort((a, b) => a.time - b.time);
+      // Pre-reset buys come first in FIFO order (cost = sell price, so P&L = 0)
+      // followed by post-reset buys at actual cost
+      const allBuys = [
+        ...(preBuys[productId] || []).sort((a, b) => a.time - b.time),
+        ...(postBuys[productId] || []).sort((a, b) => a.time - b.time),
+      ];
       let buyIdx = 0;
-      let buyRemaining = buys.length > 0 ? buys[0].qty : 0;
+      let buyRemaining = allBuys.length > 0 ? allBuys[0].qty : 0;
 
       for (const sell of sells) {
         let sellRemaining = sell.qty;
-        let sellRevenue = sell.qty * sell.price - sell.fee;
+        const sellRevenue = sell.qty * sell.price - sell.fee;
         let buyCost = 0;
 
-        // Match against buys FIFO
-        while (sellRemaining > 0 && buyIdx < buys.length) {
+        while (sellRemaining > 1e-10 && buyIdx < allBuys.length) {
           const matchQty = Math.min(sellRemaining, buyRemaining);
-          buyCost += matchQty * buys[buyIdx].price + buys[buyIdx].fee * (matchQty / buys[buyIdx].qty);
+          const buy = allBuys[buyIdx];
+          // Pre-reset buys: use sell price as cost so P&L contribution = 0
+          const effectivePrice = buy.preReset ? sell.price : buy.price;
+          const effectiveFee = buy.preReset ? 0 : buy.fee;
+          buyCost += matchQty * effectivePrice + effectiveFee * (matchQty / buy.qty);
           sellRemaining -= matchQty;
           buyRemaining -= matchQty;
-          if (buyRemaining <= 0) {
+          if (buyRemaining <= 1e-10) {
             buyIdx++;
-            buyRemaining = buyIdx < buys.length ? buys[buyIdx].qty : 0;
+            buyRemaining = buyIdx < allBuys.length ? allBuys[buyIdx].qty : 0;
           }
         }
 
         const realizedPl = sellRevenue - buyCost;
 
-        // Add to each applicable window
         for (const [period, cutoff] of Object.entries(windows)) {
           if (sell.time >= cutoff) {
             result[period].realizedPl += realizedPl;
             result[period].trades += 1;
+            result[period].tradeDetails.push({ symbol: productId, time: sell.time, qty: sell.qty, sellPrice: sell.price, realizedPl });
+          }
+        }
+
+        for (const [period, range] of Object.entries(exclusiveCutoffs)) {
+          if (sell.time >= range.from && sell.time < range.to) {
+            exclusive[period].realizedPl += realizedPl;
+            exclusive[period].trades += 1;
           }
         }
       }
     }
 
-    return result;
+    return { ...result, exclusive };
   }
 }

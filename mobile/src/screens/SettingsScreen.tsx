@@ -129,6 +129,41 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container}>
+      {/* Trading Mode */}
+      <Text style={[styles.sectionHeader, { marginTop: 8 }]}>TRADING MODE</Text>
+      {configLoading ? (
+        <View style={[styles.section, { paddingVertical: 20, alignItems: "center" }]}>
+          <ActivityIndicator color="#e94560" />
+        </View>
+      ) : config ? (
+        <View style={[styles.section, { padding: 8 }]}>
+          <View style={styles.modeToggle}>
+            <TouchableOpacity
+              style={[styles.modeOption, config.ACTIVE_BROKER !== "coinbase" && styles.modeOptionActive]}
+              onPress={() => saveConfig({ ACTIVE_BROKER: "alpaca" })}
+              disabled={saving}
+            >
+              <Text style={styles.modeOptionEmoji}>📈</Text>
+              <Text style={[styles.modeOptionText, config.ACTIVE_BROKER !== "coinbase" && styles.modeOptionTextActive]}>
+                Stocks
+              </Text>
+              <Text style={styles.modeOptionSub}>Alpaca Paper</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modeOption, config.ACTIVE_BROKER === "coinbase" && styles.modeOptionActive]}
+              onPress={() => saveConfig({ ACTIVE_BROKER: "coinbase" })}
+              disabled={saving}
+            >
+              <Text style={styles.modeOptionEmoji}>🪙</Text>
+              <Text style={[styles.modeOptionText, config.ACTIVE_BROKER === "coinbase" && styles.modeOptionTextActive]}>
+                Crypto
+              </Text>
+              <Text style={styles.modeOptionSub}>Coinbase Live</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
       {/* Account Info */}
       <Text style={styles.sectionHeader}>ACCOUNT</Text>
       <View style={styles.section}>
@@ -470,5 +505,39 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginTop: 24,
     fontSize: 13,
+  },
+  modeToggle: {
+    flexDirection: "row",
+    gap: 8,
+    padding: 4,
+  },
+  modeOption: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 16,
+    borderRadius: 10,
+    backgroundColor: "#0f3460",
+    borderWidth: 2,
+    borderColor: "#0f3460",
+    gap: 4,
+  },
+  modeOptionActive: {
+    backgroundColor: "#1a1a3e",
+    borderColor: "#e94560",
+  },
+  modeOptionEmoji: {
+    fontSize: 24,
+  },
+  modeOptionText: {
+    color: "#888",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  modeOptionTextActive: {
+    color: "#fff",
+  },
+  modeOptionSub: {
+    color: "#555",
+    fontSize: 11,
   },
 });

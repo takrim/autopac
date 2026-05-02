@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef } from "react";
+import React, { useCallback, useState, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -12,19 +12,38 @@ import {
 } from "react-native";
 import { Swipeable } from "react-native-gesture-handler";
 import { useFocusEffect } from "@react-navigation/native";
-import { Position, fetchPositions, liquidatePosition, updateStopLoss } from "../services/api";
+import { Position, fetchPositions, fetchConfig, liquidatePosition, updateStopLoss } from "../services/api";
 
 export default function PositionsScreen() {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [activeBroker, setActiveBroker] = useState<string>("alpaca");
+  const [stopLossPct, setStopLossPct] = useState<number>(0.5);
+  const [showAll, setShowAll] = useState(false);
+  const [sortKey, setSortKey] = useState<"latest" | "pnl" | "name">("latest");
   const [loading, setLoading] = useState(true);
+
+  const sortedPositions = useMemo(() => {
+    const base = showAll
+      ? positions
+      : positions.filter(p => parseFloat(p.unrealized_pl || "0") >= 0);
+    const arr = [...base];
+    if (sortKey === "pnl") {
+      arr.sort((a, b) => parseFloat(b.unrealized_pl || "0") - parseFloat(a.unrealized_pl || "0"));
+    } else if (sortKey === "name") {
+      arr.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    }
+    return arr;
+  }, [positions, showAll, sortKey]);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadPositions = useCallback(async () => {
     try {
       setError(null);
-      const data = await fetchPositions();
+      const [data, cfg] = await Promise.all([fetchPositions(), fetchConfig()]);
       setPositions(data);
+      setActiveBroker(cfg.ACTIVE_BROKER);
+      setStopLossPct(cfg.STOP_LOSS_PCT ?? 0.5);
     } catch (err: any) {
       setError(err.message || "Failed to load positions");
     } finally {
@@ -74,8 +93,25 @@ export default function PositionsScreen() {
     0
   );
 
+  const hasLosers = positions.some(p => parseFloat(p.unrealized_pl || "0") < 0);
+
   return (
     <View style={styles.container}>
+      {/* Sort bar */}
+      <View style={styles.sortBar}>
+        {(["latest", "pnl", "name"] as const).map((key) => (
+          <TouchableOpacity
+            key={key}
+            style={[styles.sortChip, sortKey === key && styles.sortChipActive]}
+            onPress={() => setSortKey(key)}
+          >
+            <Text style={[styles.sortChipText, sortKey === key && styles.sortChipTextActive]}>
+              {key === "latest" ? "Latest" : key === "pnl" ? "P&L" : "Name"}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
       {/* Summary bar */}
       {positions.length > 0 && (
         <View style={styles.summaryBar}>
@@ -100,10 +136,10 @@ export default function PositionsScreen() {
       )}
 
       <FlatList
-        data={positions}
+        data={sortedPositions}
         keyExtractor={(item) => item.symbol}
         renderItem={({ item }) => (
-          <PositionCard position={item} onLiquidated={loadPositions} />
+          <PositionCard position={item} onLiquidated={loadPositions} isCoinbase={activeBroker === "coinbase"} stopLossPct={stopLossPct} />
         )}
         refreshControl={
           <RefreshControl
@@ -114,6 +150,18 @@ export default function PositionsScreen() {
             }}
             tintColor="#e94560"
           />
+        }
+        ListHeaderComponent={
+          hasLosers ? (
+            <TouchableOpacity
+              style={styles.showAllToggle}
+              onPress={() => setShowAll(v => !v)}
+            >
+              <Text style={styles.showAllToggleText}>
+                {showAll ? "🏆 Winning only" : `📋 Show all (${positions.length})`}
+              </Text>
+            </TouchableOpacity>
+          ) : null
         }
         ListEmptyComponent={
           <View style={styles.center}>
@@ -126,7 +174,7 @@ export default function PositionsScreen() {
   );
 }
 
-function PositionCard({ position, onLiquidated }: { position: Position; onLiquidated: () => void }) {
+function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5 }: { position: Position; onLiquidated: () => void; isCoinbase?: boolean; stopLossPct?: number }) {
   const swipeableRef = useRef<Swipeable>(null);
   const [liquidating, setLiquidating] = useState(false);
   const [movingSloss, setMovingSloss] = useState(false);
@@ -139,16 +187,46 @@ function PositionCard({ position, onLiquidated }: { position: Position; onLiquid
   const stopLoss = position.stop_loss ? parseFloat(position.stop_loss) : null;
   const slPct = stopLoss !== null && entry > 0 ? ((stopLoss - entry) / entry) * 100 : null;
 
-  // Move SL button logic:
+  // Set SL button: shown when no stop loss exists for any broker
+  const showSetSl = stopLoss === null;
+  const setSLPrice = entry * (1 - stopLossPct / 100);
+
+  // Move SL button logic (only when SL already exists):
   // - if profit% > 2%: trail to 1% below current price
   // - if profit > 0% but ≤ 2%: move to break-even (entry price)
   // - otherwise: hidden
-  const showMoveSl = plPct > 0;
+  const showMoveSl = isCoinbase && stopLoss !== null && plPct > 0;
   const trailMode = plPct > 2;
   const newSlPrice = trailMode ? current * 0.99 : entry;
   const moveSLLabel = trailMode
     ? `Trail SL → $${newSlPrice.toFixed(4)} (-1% cur)`
     : `Move SL → Break Even $${entry.toFixed(4)}`;
+
+  const handleSetStopLoss = () => {
+    Alert.alert(
+      "Set Stop Loss",
+      `Place stop loss at $${setSLPrice.toFixed(4)} (${stopLossPct}% below entry $${entry.toFixed(4)})?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Confirm",
+          onPress: async () => {
+            setMovingSloss(true);
+            try {
+              await updateStopLoss(position.symbol, setSLPrice);
+              Alert.alert("Stop Loss Set", `${position.symbol} stop loss set to $${setSLPrice.toFixed(4)}`);
+              onLiquidated();
+            } catch (err: any) {
+              console.error('[SetSL] Failed to set stop loss', { symbol: position.symbol, setSLPrice, error: err.message });
+              Alert.alert("Failed", err.message || "Failed to set stop loss");
+            } finally {
+              setMovingSloss(false);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const handleMoveStopLoss = () => {
     Alert.alert(
@@ -167,6 +245,7 @@ function PositionCard({ position, onLiquidated }: { position: Position; onLiquid
               Alert.alert("Stop Loss Updated", `${position.symbol} stop loss set to $${newSlPrice.toFixed(4)}`);
               onLiquidated(); // refresh positions
             } catch (err: any) {
+              console.error('[MoveSL] Failed to update stop loss', { symbol: position.symbol, newSlPrice, error: err.message });
               Alert.alert("Failed", err.message || "Failed to update stop loss");
             } finally {
               setMovingSloss(false);
@@ -332,6 +411,23 @@ function PositionCard({ position, onLiquidated }: { position: Position; onLiquid
           )}
         </View>
 
+        {/* Set Stop Loss button — shown when no SL exists */}
+        {showSetSl && (
+          <TouchableOpacity
+            style={[styles.moveSlButton, styles.moveSlButtonSetSL, movingSloss && { opacity: 0.6 }]}
+            onPress={handleSetStopLoss}
+            disabled={movingSloss}
+          >
+            {movingSloss ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.moveSlButtonText}>
+                🛡️ Set SL → ${setSLPrice.toFixed(4)} (-{stopLossPct}%)
+              </Text>
+            )}
+          </TouchableOpacity>
+        )}
+
         {/* Move Stop Loss button */}
         {showMoveSl && (
           <TouchableOpacity
@@ -391,6 +487,36 @@ const styles = StyleSheet.create({
   },
   emptyContainer: {
     flex: 1,
+  },
+  sortBar: {
+    flexDirection: "row",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+    backgroundColor: "#1a1a2e",
+    borderBottomWidth: 1,
+    borderBottomColor: "#0f3460",
+  },
+  sortChip: {
+    flex: 1,
+    paddingVertical: 6,
+    borderRadius: 20,
+    alignItems: "center",
+    backgroundColor: "#16213e",
+    borderWidth: 1,
+    borderColor: "#0f3460",
+  },
+  sortChipActive: {
+    backgroundColor: "#e94560",
+    borderColor: "#e94560",
+  },
+  sortChipText: {
+    color: "#888",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  sortChipTextActive: {
+    color: "#fff",
   },
   summaryBar: {
     flexDirection: "row",
@@ -507,6 +633,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#5bc0de",
   },
+  moveSlButtonSetSL: {
+    backgroundColor: "#3a1a1a",
+    borderWidth: 1,
+    borderColor: "#e94560",
+  },
   moveSlButtonText: {
     color: "#fff",
     fontSize: 14,
@@ -559,5 +690,21 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 14,
     fontWeight: "bold",
+  },
+  showAllToggle: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 2,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: "#16213e",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#0f3460",
+    alignSelf: "flex-start",
+  },
+  showAllToggleText: {
+    color: "#aaa",
+    fontSize: 13,
   },
 });

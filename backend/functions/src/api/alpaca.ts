@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { logger } from "firebase-functions/v2";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAlpacaConfig } from "../config";
 import { getTradingConfig } from "./config";
 import { getBroker } from "../brokers";
@@ -102,15 +103,30 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
 
     // Default: Alpaca positions with simulated fees
     const config = getAlpacaConfig();
-    const resp = await fetch(`${config.baseUrl}/v2/positions`, {
-      headers: getHeaders(),
-    });
+    const [resp, ordersResp] = await Promise.all([
+      fetch(`${config.baseUrl}/v2/positions`, { headers: getHeaders() }),
+      fetch(`${config.baseUrl}/v2/orders?status=open&limit=500`, { headers: getHeaders() }),
+    ]);
 
     if (!resp.ok) {
       const err = await resp.text();
       logger.error("[API] Alpaca positions fetch failed", { status: resp.status, err });
       res.status(502).json({ error: "Failed to fetch positions" });
       return;
+    }
+
+    // Build a map of symbol -> stop_price from open stop/stop_limit orders
+    const stopPriceBySymbol = new Map<string, string>();
+    if (ordersResp.ok) {
+      const openOrders = (await ordersResp.json()) as Array<Record<string, unknown>>;
+      for (const o of openOrders) {
+        const sym = o.symbol as string;
+        const side = o.side as string;
+        const type = o.type as string;
+        if (side === "sell" && (type === "stop" || type === "stop_limit") && o.stop_price) {
+          stopPriceBySymbol.set(sym, o.stop_price as string);
+        }
+      }
     }
 
     const positions = (await resp.json()) as Array<Record<string, unknown>>;
@@ -154,6 +170,7 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
         asset_class: p.asset_class,
         simulated_fees: totalFees.toFixed(6),
         fee_rate: effectiveFeeRate,
+        ...(stopPriceBySymbol.has(p.symbol as string) && { stop_loss: stopPriceBySymbol.get(p.symbol as string) }),
       };
     });
 
@@ -202,19 +219,36 @@ export async function handleUpdateStopLoss(req: Request, res: Response): Promise
 
   try {
     const tradingConfig = await getTradingConfig();
-    if (tradingConfig.ACTIVE_BROKER !== "coinbase") {
-      res.status(400).json({ error: "Stop loss update only supported for Coinbase" });
-      return;
-    }
-    const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker;
-    const result = await broker.updateStopLoss(symbol, stopPrice);
+    // Always use the active broker — same as /positions endpoint.
+    const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker | import("../brokers/alpaca").AlpacaBroker;
+    const resolvedBroker = tradingConfig.ACTIVE_BROKER;
+    const result = await (broker as any).updateStopLoss(symbol, stopPrice);
     if (!result.success) {
+      logger.error("[API] updateStopLoss broker failed", { symbol, stopPrice, message: result.message });
+      await getFirestore().collection("broker_errors").add({
+        broker: resolvedBroker,
+        action: "updateStopLoss",
+        userId: user.uid,
+        symbol,
+        stopPrice,
+        error: result.message,
+        timestamp: FieldValue.serverTimestamp(),
+      });
       res.status(500).json({ error: result.message });
       return;
     }
     res.json({ status: "updated", symbol, stopPrice, orderId: result.orderId, message: result.message });
   } catch (err) {
     logger.error("[API] updateStopLoss error", { symbol, error: String(err) });
+    await getFirestore().collection("broker_errors").add({
+      broker: "unknown",
+      action: "updateStopLoss",
+      userId: user?.uid,
+      symbol,
+      stopPrice,
+      error: String(err),
+      timestamp: FieldValue.serverTimestamp(),
+    });
     res.status(500).json({ error: String(err) });
   }
 }

@@ -18,7 +18,7 @@ import { TrendingCrypto, fetchTrending, fetchConfig, updateConfig, TradingConfig
 
 type SortMode = "price_change" | "gainers" | "losers" | "volume";
 
-/** Convert Coinbase product_id "BTC-USD" → allowedSymbols format "BTCUSD" */
+/** Convert Coinbase product_id "BTC-USD" → allowedSymbols format "BTCUSD", or stock "AAPL" → "AAPL" */
 function toTickerSymbol(productId: string): string {
   return productId.replace("-", "");
 }
@@ -133,7 +133,8 @@ export default function TrendingScreen() {
   const renderItem = ({ item, index }: { item: TrendingCrypto; index: number }) => {
     const isPositive = item.priceChange24h >= 0;
     const changeColor = isPositive ? "#4caf50" : "#e94560";
-    const baseSymbol = item.symbol.split("-")[0];
+    // For crypto: "BTC-USD" → "BTC"; for stocks: "AAPL" → "AAPL"
+    const baseSymbol = item.symbol.includes("-") ? item.symbol.split("-")[0] : item.symbol;
     const ticker = toTickerSymbol(item.symbol);
     const isAllowed = allowedSymbols.includes(ticker);
     const isTogglingThis = toggling === item.symbol;
@@ -211,6 +212,13 @@ export default function TrendingScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Mode badge */}
+      <View style={styles.modeBadge}>
+        <Text style={styles.modeBadgeText}>
+          {activeBroker === "coinbase" ? "🪙 Crypto · Coinbase" : "📈 Stocks · Alpaca Paper"}
+        </Text>
+      </View>
+
       {/* Sort bar */}
       <View style={styles.sortBar}>
         {renderSortButton("price_change", "🔥 Trending")}
@@ -257,7 +265,7 @@ export default function TrendingScreen() {
                     <Image source={{ uri: selectedItem.imageUrl }} style={styles.modalIcon} />
                   ) : (
                     <View style={[styles.modalIconPlaceholder, { backgroundColor: selectedItem.color || "#888" }]}>
-                      <Text style={styles.modalIconText}>{selectedItem.symbol.split("-")[0].slice(0, 2)}</Text>
+                    <Text style={styles.modalIconText}>{(selectedItem.symbol.includes("-") ? selectedItem.symbol.split("-")[0] : selectedItem.symbol).slice(0, 2)}</Text>
                     </View>
                   )}
                   <View style={styles.modalHeaderText}>
@@ -366,6 +374,8 @@ const styles = StyleSheet.create({
   errorText: { color: "#e94560", fontSize: 16, marginBottom: 16, textAlign: "center", paddingHorizontal: 24 },
   retryButton: { backgroundColor: "#e94560", paddingHorizontal: 24, paddingVertical: 10, borderRadius: 8 },
   retryText: { color: "#fff", fontWeight: "bold" },
+  modeBadge: { backgroundColor: "#16213e", paddingHorizontal: 16, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#0f3460" },
+  modeBadgeText: { color: "#888", fontSize: 12, fontWeight: "600", textAlign: "center" },
 
   // Sort bar
   sortBar: { flexDirection: "row", padding: 12, gap: 8 },

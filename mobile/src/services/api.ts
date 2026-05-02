@@ -158,9 +158,18 @@ export interface Position {
   stop_loss?: string;
 }
 
+export interface TradeDetail {
+  symbol: string;
+  time: number;
+  qty: number;
+  sellPrice: number;
+  realizedPl: number;
+}
+
 export interface PerformanceMetric {
   realizedPl: number;
   trades: number;
+  tradeDetails?: TradeDetail[];
 }
 
 export interface PositionsResponse {

@@ -3,7 +3,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import { TradeApprovalRequest, Signal, Decision, Order } from "../types";
 import { CONFIG } from "../config";
-import { getTradingConfig, getActiveBrokerSettings } from "./config";
+import { getTradingConfig, getActiveBrokerSettings, getBrokerSettings } from "./config";
 import { getBroker } from "../brokers";
 import { runRiskChecks } from "../services/risk";
 import { logAudit } from "../services/audit";
@@ -147,10 +147,11 @@ export async function executeOrder(
     return { status: statusMessage };
   }
 
-  // Place order via broker
+  // Place order via broker — use the broker stamped on the signal, not ACTIVE_BROKER
   const tradingConfig = await getTradingConfig();
-  const broker = getBroker(tradingConfig.ACTIVE_BROKER);
-  const brokerSettings = getActiveBrokerSettings(tradingConfig);
+  const resolvedBroker = (signal.broker as "mock" | "alpaca" | "coinbase") || tradingConfig.ACTIVE_BROKER;
+  const broker = getBroker(resolvedBroker);
+  const brokerSettings = getBrokerSettings(tradingConfig, resolvedBroker);
   const tradeValueUsd = brokerSettings.tradeValueUsd;
   const quantity = tradeValueUsd / signal.price;
 

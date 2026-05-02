@@ -4,7 +4,7 @@ import { logger } from "firebase-functions/v2";
 import crypto from "crypto";
 import { WebhookPayload, Signal } from "../types";
 import { getWebhookSecret, CONFIG } from "../config";
-import { getTradingConfig, TradingConfig, getActiveBrokerSettings } from "../api/config";
+import { getTradingConfig, TradingConfig, getActiveBrokerSettings, getBrokerForSymbol } from "../api/config";
 import { sendSignalNotification } from "../services/notification";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
@@ -13,6 +13,74 @@ import { getBroker } from "../brokers";
 
 const db = getFirestore();
 
+/**
+ * Fetch the last 5 filled stop-loss orders across all symbols.
+ * Returned as plain data to be merged into the rejected signal's meta.
+ */
+async function getRecentStopFills(symbol: string): Promise<Array<Record<string, unknown>>> {
+  try {
+    const tradingConfig = await getTradingConfig();
+    const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+
+    if (broker.name === "alpaca") {
+      const { getAlpacaConfig } = await import("../config");
+      const config = getAlpacaConfig();
+      const headers = {
+        "APCA-API-KEY-ID": config.apiKey,
+        "APCA-API-SECRET-KEY": config.apiSecret,
+        "Content-Type": "application/json",
+      };
+      const resp = await fetch(
+        `${config.baseUrl}/v2/orders?status=closed&limit=50&direction=desc`,
+        { headers }
+      );
+      if (resp.ok) {
+        const orders = (await resp.json()) as Array<Record<string, unknown>>;
+        return orders
+          .filter((o) => o.side === "sell" && (o.type === "stop" || o.type === "stop_limit") && o.status === "filled")
+          .slice(0, 5)
+          .map((o) => ({
+            orderId: o.id,
+            symbol: o.symbol,
+            stop_price: o.stop_price,
+            limit_price: o.limit_price,
+            filled_at: o.filled_at,
+            filled_qty: o.filled_qty,
+            filled_avg_price: o.filled_avg_price,
+          }));
+      }
+    } else if (broker.name === "coinbase") {
+      const cb = broker as import("../brokers/coinbase").CoinbaseBroker;
+      const { ok, data } = await (cb as any).request("GET", "/orders/historical/batch?order_status=FILLED&limit=50");
+      if (ok) {
+        const orders = (data.orders as Array<Record<string, unknown>> | undefined) || [];
+        return orders
+          .filter((o) => {
+            if (o.side !== "SELL") return false;
+            const cfg = o.order_configuration as Record<string, unknown> | undefined;
+            return !!(cfg?.stop_limit_stop_limit_gtc || cfg?.stop_limit_stop_limit_gtd);
+          })
+          .slice(0, 5)
+          .map((o) => {
+            const cfg = o.order_configuration as Record<string, unknown> | undefined;
+            const sl = (cfg?.stop_limit_stop_limit_gtc || cfg?.stop_limit_stop_limit_gtd) as Record<string, string> | undefined;
+            return {
+              orderId: o.order_id,
+              symbol: o.product_id,
+              stop_price: sl?.stop_price,
+              limit_price: sl?.limit_price,
+              filled_at: o.last_fill_time,
+              filled_qty: o.filled_size,
+              filled_avg_price: o.average_filled_price,
+            };
+          });
+      }
+    }
+  } catch (err) {
+    logger.warn("[DEBUG] getRecentStopFills failed (non-fatal)", { symbol, error: String(err) });
+  }
+  return [];
+}
 /**
  * Persist a signal decision record to Firestore for full audit trail.
  */
@@ -247,10 +315,10 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
   const { payload } = validation;
   const idempotencyKey = generateIdempotencyKey(payload);
 
-  // Check broker's allowed symbols list
-  const brokerSettings = getActiveBrokerSettings(tradingConfig);
-  if (brokerSettings.allowedSymbols.length > 0 && !brokerSettings.allowedSymbols.includes(payload.symbol)) {
-    logger.info("[WEBHOOK] Symbol not in broker allowlist", { symbol: payload.symbol, broker: tradingConfig.ACTIVE_BROKER });
+  // Resolve which broker handles this symbol — independent of ACTIVE_BROKER
+  const signalBroker = getBrokerForSymbol(tradingConfig, payload.symbol);
+  if (!signalBroker) {
+    logger.info("[WEBHOOK] Symbol not in any broker allowlist", { symbol: payload.symbol });
     res.status(200).json({ status: "skipped_not_in_allowlist", symbol: payload.symbol });
     return;
   }
@@ -269,10 +337,10 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     return;
   }
 
-  // Pyramid check: query active broker for an open position on this symbol
+  // Pyramid check: query resolved broker for an open position on this symbol
   if (!tradingConfig.ORDER_PYRAMID && payload.action === "BUY") {
     try {
-      const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+      const broker = getBroker(signalBroker);
       const position = await broker.getPosition(payload.symbol);
 
       if (position && position.qty > 0) {
@@ -348,7 +416,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     takeProfit: payload.takeProfit,
     signalTime: payload.signalTime,
     status: "PENDING",
-    broker: tradingConfig.ACTIVE_BROKER,
+    broker: signalBroker,
     idempotencyKey,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
@@ -390,7 +458,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 
   // Calculate RSI(14) and VWAP for the signal — non-blocking, don't fail the webhook
   try {
-    const indicators = await calculateIndicators(payload.symbol, payload.price, tradingConfig.ACTIVE_BROKER);
+    const indicators = await calculateIndicators(payload.symbol, payload.price, signalBroker);
     const indicatorUpdate: Record<string, unknown> = {};
     if (indicators.rsi !== null) {
       indicatorUpdate.rsi = parseFloat(indicators.rsi.toFixed(4));
@@ -441,7 +509,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     payload: { strategy: payload.strategy, action: payload.action, timeframe: payload.timeframe, price: payload.price, signalTime: payload.signalTime },
     decision: isStrongBuy ? "bought" : "stored",
     reasons: isStrongBuy ? ["Strong Buy — strategy + bulltrend correlated"] : ["Strategy signal stored — waiting for bulltrend correlation"],
-    broker: tradingConfig.ACTIVE_BROKER,
+    broker: signalBroker,
     rsi: freshData?.rsi ?? null,
     price: payload.price,
     signalId: docRef.id,
@@ -510,25 +578,27 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
     return;
   }
 
-  // Check broker's allowed symbols list
+  // Resolve which broker handles this symbol — independent of ACTIVE_BROKER
   let tradingConfigForFilter: TradingConfig | undefined;
+  let bulltrendBroker: "mock" | "alpaca" | "coinbase" = "alpaca";
   try {
     tradingConfigForFilter = await getTradingConfig();
-    const bs = getActiveBrokerSettings(tradingConfigForFilter);
-    if (bs.allowedSymbols.length > 0 && !bs.allowedSymbols.includes(symbol)) {
-      logger.info("[BULLTREND] Symbol not in broker allowlist", { symbol, broker: tradingConfigForFilter.ACTIVE_BROKER });
+    const resolved = getBrokerForSymbol(tradingConfigForFilter, symbol);
+    if (!resolved) {
+      logger.info("[BULLTREND] Symbol not in any broker allowlist", { symbol });
       await logDecision({
         handler: "bulltrend",
         symbol,
         payload: { bullish_trend: bullishTrend, price, volume, time },
         decision: "skipped",
-        reasons: [`Symbol not in ${tradingConfigForFilter.ACTIVE_BROKER} allowlist`],
+        reasons: ["Symbol not in any broker allowlist"],
         broker: tradingConfigForFilter.ACTIVE_BROKER,
         price: !isNaN(price) ? price : null,
       });
       res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
       return;
     }
+    bulltrendBroker = resolved;
   } catch (err) {
     logger.warn("[BULLTREND] Config load failed for symbol filter (non-fatal), proceeding", { error: String(err) });
   }
@@ -599,7 +669,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
         payload: { bullish_trend: bullishTrend, price, volume, time },
         decision: "skipped",
         reasons: ["bullish_trend is false — no buy evaluation"],
-        broker: tradingConfigForFilter?.ACTIVE_BROKER,
+        broker: bulltrendBroker,
         price: !isNaN(price) ? price : null,
         meta: { bulltrendId: bulltrendDoc.id },
       });
@@ -617,7 +687,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           let buyRsi: number | undefined;
           let buySupport: number | undefined;
           try {
-            const indicators = await calculateIndicators(symbol, entryPrice, tradingConfig.ACTIVE_BROKER);
+            const indicators = await calculateIndicators(symbol, entryPrice, bulltrendBroker);
             if (!isNaN(rsiOverride)) {
               buyRsi = parseFloat(rsiOverride.toFixed(4));
               logger.info("[BULLTREND] RSI override provided", { symbol, rsi: buyRsi });
@@ -655,16 +725,17 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           if (!shouldBuy) {
             logger.info("[BULLTREND] Skipping auto-buy — RSI does not confirm buy", { symbol, rsi: buyRsi });
             // Log rejection decision
+            const recentStopFills = await getRecentStopFills(symbol);
             await logDecision({
               handler: "bulltrend",
               symbol,
               payload: { bullish_trend: bullishTrend, price, volume, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
               decision: "rejected",
               reasons: buyReasons,
-              broker: tradingConfig.ACTIVE_BROKER,
+              broker: bulltrendBroker,
               rsi: buyRsi ?? null,
               price: !isNaN(price) ? price : null,
-              meta: { rsiInBuyZone, rsiTooHigh, rsiUnavailable, bulltrendId: bulltrendDoc.id, matchedSignalId },
+              meta: { rsiInBuyZone, rsiTooHigh, rsiUnavailable, bulltrendId: bulltrendDoc.id, matchedSignalId, recentStopFills },
             });
             // Still store the bulltrend but skip order creation
           } else {
@@ -672,7 +743,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           // Pyramid check: block duplicate buy if position already exists
           if (!tradingConfig.ORDER_PYRAMID) {
             try {
-              const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+              const broker = getBroker(bulltrendBroker);
               const existingPos = await broker.getPosition(symbol);
               if (existingPos && existingPos.qty > 0) {
                 logger.info("[BULLTREND] Pyramid disabled — skipping BUY, position exists", { broker: broker.name, symbol, qty: existingPos.qty });
@@ -682,7 +753,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
                   payload: { bullish_trend: bullishTrend, price, volume, time },
                   decision: "skipped",
                   reasons: [...buyReasons, `Pyramid disabled — already holding ${existingPos.qty} ${symbol}`],
-                  broker: tradingConfig.ACTIVE_BROKER,
+                  broker: bulltrendBroker,
                   rsi: buyRsi ?? null,
                   price: !isNaN(price) ? price : null,
                   meta: { existingQty: existingPos.qty, bulltrendId: bulltrendDoc.id },
@@ -706,9 +777,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             strongBuy: rsiInBuyZone,
             bullishTrend: true,
             bulltrendPrice: entryPrice,
-            broker: tradingConfig.ACTIVE_BROKER,
+            broker: bulltrendBroker,
             ...(buyRsi !== undefined && { rsi: buyRsi }),
-            ...(buySupport !== undefined && { stopLoss: buySupport }),
+            stopLoss: buySupport !== undefined
+              ? buySupport
+              : parseFloat((entryPrice * (1 - (tradingConfig.STOP_LOSS_PCT ?? 0.5) / 100)).toFixed(8)),
             idempotencyKey: crypto.createHash("sha256").update(`rsi-bull:${symbol}:${Date.now()}`).digest("hex").slice(0, 32),
             createdAt: FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp(),
@@ -733,7 +806,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             payload: { bullish_trend: bullishTrend, price, volume, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
             decision: "bought",
             reasons: buyReasons,
-            broker: tradingConfig.ACTIVE_BROKER,
+            broker: bulltrendBroker,
             rsi: buyRsi ?? null,
             price: entryPrice,
             signalId: rsiDocRef.id,
@@ -757,7 +830,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             payload: { bullish_trend: bullishTrend, price, volume, time },
             decision: "skipped",
             reasons: [`ORDER_MODE is ${mode} — RSI auto-buy not active`],
-            broker: tradingConfig.ACTIVE_BROKER,
+            broker: bulltrendBroker,
             price: !isNaN(price) ? price : null,
             meta: { mode, bulltrendId: bulltrendDoc.id, matchedSignalId },
           });
@@ -826,24 +899,26 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
     return;
   }
 
-  // Check broker's allowed symbols list
+  // Resolve which broker handles this symbol — independent of ACTIVE_BROKER
+  let beartrendBroker: "mock" | "alpaca" | "coinbase" = "alpaca";
   try {
     const configForFilter = await getTradingConfig();
-    const bs = getActiveBrokerSettings(configForFilter);
-    if (bs.allowedSymbols.length > 0 && !bs.allowedSymbols.includes(symbol)) {
-      logger.info("[BEARTREND] Symbol not in broker allowlist", { symbol, broker: configForFilter.ACTIVE_BROKER });
+    const resolved = getBrokerForSymbol(configForFilter, symbol);
+    if (!resolved) {
+      logger.info("[BEARTREND] Symbol not in any broker allowlist", { symbol });
       await logDecision({
         handler: "beartrend",
         symbol,
         payload: { bear_trend: bearTrend, price, time },
         decision: "skipped",
-        reasons: [`Symbol not in ${configForFilter.ACTIVE_BROKER} allowlist`],
+        reasons: ["Symbol not in any broker allowlist"],
         broker: configForFilter.ACTIVE_BROKER,
         price: !isNaN(price) ? price : null,
       });
       res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
       return;
     }
+    beartrendBroker = resolved;
   } catch (err) {
     logger.warn("[BEARTREND] Config load failed for symbol filter (non-fatal), proceeding", { error: String(err) });
   }
@@ -877,7 +952,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
         } else {
           try {
             const currentPrice = !isNaN(price) ? price : 0;
-            const indicators = await calculateIndicators(symbol, currentPrice, tradingConfig.ACTIVE_BROKER);
+            const indicators = await calculateIndicators(symbol, currentPrice, beartrendBroker);
             currentRsi = indicators.rsi !== null ? parseFloat(indicators.rsi.toFixed(4)) : null;
           } catch (indErr) {
             logger.warn("[BEARTREND] RSI calculation failed (non-fatal)", { symbol, error: String(indErr) });
@@ -929,39 +1004,114 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
         logger.info("[BEARTREND] Sell decision", { symbol, ...sellDecision });
 
         if (!shouldSell) {
-          logger.info("[BEARTREND] Skipping liquidation — RSI does not confirm sell", { symbol, currentRsi, buyRsi });            await logDecision({
-              handler: "beartrend",
-              symbol,
-              payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
-              decision: "rejected",
-              reasons,
-              broker: tradingConfig.ACTIVE_BROKER,
-              rsi: currentRsi,
-              price: !isNaN(price) ? price : null,
-              meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id },
-            });        } else {
-          try {
-            const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+          // RSI > 60 and not in the overbought sell zone — if position is profitable, place a trailing stop
+          // instead of simply rejecting. This protects profit without exiting early.
+          logger.info("[BEARTREND] RSI does not confirm sell — checking PnL for stop-loss placement", { symbol, currentRsi, buyRsi });
 
-            // PnL gate: only sell if position is profitable (fee-inclusive)
+          let stopPlaced = false;
+          let stopResult: Record<string, unknown> | null = null;
+          let pnlForStop: number | null = null;
+
+          try {
+            const broker = getBroker(beartrendBroker);
+            if (broker.getDetailedPositions) {
+              const detailedPositions = await broker.getDetailedPositions();
+              const productId = symbol.includes("-") ? symbol : symbol.replace(/USD$/, "") + "-USD";
+              const pos = detailedPositions.find((p) => p.symbol === productId);
+              if (pos) {
+                pnlForStop = parseFloat(pos.unrealized_pl);
+                const currentPriceForStop = !isNaN(price) ? price : parseFloat(pos.current_price);
+                if (pnlForStop > 0 && currentRsi !== null && currentRsi > 60) {
+                  // Place stop loss 1% below current price
+                  const stopPrice = parseFloat((currentPriceForStop * 0.99).toFixed(8));
+                  logger.info("[BEARTREND] Placing protective stop loss (RSI>60, PnL positive)", { symbol, stopPrice, currentPrice: currentPriceForStop, rsi: currentRsi, pnl: pnlForStop });
+                  if ((broker as any).updateStopLoss) {
+                    stopResult = await (broker as any).updateStopLoss(symbol, stopPrice);
+                    stopPlaced = (stopResult as any)?.success === true;
+                  }
+                }
+              }
+            }
+          } catch (stopErr) {
+            logger.warn("[BEARTREND] Stop-loss placement failed (non-fatal)", { symbol, error: String(stopErr) });
+          }
+
+          const recentStopFills = await getRecentStopFills(symbol);
+          const decisionReasons = stopPlaced
+            ? [...reasons, `Placed protective stop-loss 1% below current price (RSI=${currentRsi}, PnL=$${pnlForStop?.toFixed(4)})`]
+            : reasons;
+          await logDecision({
+            handler: "beartrend",
+            symbol,
+            payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+            decision: stopPlaced ? "stored" : "rejected",
+            reasons: decisionReasons,
+            broker: beartrendBroker,
+            rsi: currentRsi,
+            price: !isNaN(price) ? price : null,
+            meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id, recentStopFills, stopPlaced, stopResult, pnlForStop },
+          });
+        } else {
+          try {
+            const broker = getBroker(beartrendBroker);
+
+            // PnL gate + overbought zone override:
+            // If RSI is in overbought zone (65-75) and PnL is positive, place a stop loss instead of selling outright.
+            // Only sell outright when RSI dropped below buy (momentum faded) or RSI is unavailable.
             if (broker.getDetailedPositions) {
               const detailedPositions = await broker.getDetailedPositions();
               const productId = symbol.includes("-") ? symbol : symbol.replace(/USD$/, "") + "-USD";
               const pos = detailedPositions.find((p) => p.symbol === productId);
               if (pos) {
                 const pnl = parseFloat(pos.unrealized_pl);
+                const currentPriceForStop = !isNaN(price) ? price : parseFloat(pos.current_price);
+
+                // Overbought zone (65-75) + positive PnL → place stop loss, don't sell
+                if (rsiInOverboughtZone && pnl > 0) {
+                  const stopPrice = parseFloat((currentPriceForStop * 0.99).toFixed(8));
+                  logger.info("[BEARTREND] RSI in overbought zone with positive PnL — placing stop loss instead of selling", { symbol, stopPrice, rsi: currentRsi, pnl });
+                  let stopResult: Record<string, unknown> | null = null;
+                  let stopPlaced = false;
+                  try {
+                    if ((broker as any).updateStopLoss) {
+                      stopResult = await (broker as any).updateStopLoss(symbol, stopPrice);
+                      stopPlaced = (stopResult as any)?.success === true;
+                    }
+                  } catch (stopErr) {
+                    logger.warn("[BEARTREND] Stop-loss placement failed (non-fatal)", { symbol, error: String(stopErr) });
+                  }
+                  const recentStopFills = await getRecentStopFills(symbol);
+                  await logDecision({
+                    handler: "beartrend",
+                    symbol,
+                    payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
+                    decision: stopPlaced ? "stored" : "rejected",
+                    reasons: [...reasons, stopPlaced ? `Placed protective stop-loss 1% below current price (RSI=${currentRsi} overbought, PnL=$${pnl.toFixed(4)})` : `Stop-loss placement failed`],
+                    broker: beartrendBroker,
+                    rsi: currentRsi,
+                    price: !isNaN(price) ? price : null,
+                    meta: { currentRsi, buyRsi, rsiInOverboughtZone, pnl, stopPrice, stopPlaced, stopResult, beartrendId: beartrendDoc.id, recentStopFills },
+                  });
+                  // Skip liquidation — stop is placed
+                  liquidationResult = null;
+                  // Jump to end of sell block by continuing to response
+                  res.json({ status: stopPlaced ? "stop_loss_placed" : "rejected_stop_failed", symbol, stopPrice, pnl: pos.unrealized_pl });
+                  return;
+                }
+
                 if (pnl < 0) {
                   logger.info("[BEARTREND] PnL is negative — rejecting sell", { symbol, pnl: pos.unrealized_pl, fees: pos.actual_fees });
+                  const recentStopFills = await getRecentStopFills(symbol);
                   await logDecision({
                     handler: "beartrend",
                     symbol,
                     payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
                     decision: "rejected",
                     reasons: [...reasons, `PnL is negative ($${pnl.toFixed(4)}) including fees ($${pos.actual_fees}) — holding position`],
-                    broker: tradingConfig.ACTIVE_BROKER,
+                    broker: beartrendBroker,
                     rsi: currentRsi,
                     price: !isNaN(price) ? price : null,
-                    meta: { currentRsi, buyRsi, pnl: pos.unrealized_pl, fees: pos.actual_fees, costBasis: pos.cost_basis, marketValue: pos.market_value, beartrendId: beartrendDoc.id },
+                    meta: { currentRsi, buyRsi, pnl: pos.unrealized_pl, fees: pos.actual_fees, costBasis: pos.cost_basis, marketValue: pos.market_value, beartrendId: beartrendDoc.id, recentStopFills },
                   });
                   res.json({ status: "rejected_negative_pnl", symbol, pnl: pos.unrealized_pl });
                   return;
@@ -978,7 +1128,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
               payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
               decision: "sold",
               reasons,
-              broker: tradingConfig.ACTIVE_BROKER,
+              broker: beartrendBroker,
               rsi: currentRsi,
               price: !isNaN(price) ? price : null,
               meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id, liquidationResult },
@@ -1009,7 +1159,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
                 payload: { bear_trend: bearTrend, price, time },
                 decision: "skipped",
                 reasons: [...reasons, "No position to liquidate"],
-                broker: tradingConfig.ACTIVE_BROKER,
+                broker: beartrendBroker,
                 rsi: currentRsi,
                 price: !isNaN(price) ? price : null,
                 meta: { currentRsi, buyRsi, beartrendId: beartrendDoc.id },

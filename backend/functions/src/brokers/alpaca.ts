@@ -430,4 +430,92 @@ export class AlpacaBroker implements IBroker {
     logger.info("[ALPACA] Position liquidated", { symbol, cancelledOrders: cancelledCount });
     return closeData;
   }
+
+  async updateStopLoss(symbol: string, newStopPrice: number): Promise<{ success: boolean; orderId?: string; message: string }> {
+    const config = this.getConfig();
+    const headers = this.getHeaders();
+    const { symbol: alpacaSymbol } = this.toAlpacaSymbol(symbol);
+    const posSymbol = alpacaSymbol.replace("/", "");
+
+    // 1. Get current position for qty
+    const posResp = await fetch(`${config.baseUrl}/v2/positions/${encodeURIComponent(posSymbol)}`, { headers });
+    if (!posResp.ok) {
+      return { success: false, message: `No open position for ${symbol}` };
+    }
+    const position = await posResp.json() as Record<string, string>;
+    const qty = position.qty;
+    if (!qty || parseFloat(qty) <= 0) {
+      return { success: false, message: `No open position for ${symbol}` };
+    }
+
+    // 2. Cancel any existing stop/stop_limit orders for this symbol
+    try {
+      const ordersResp = await fetch(
+        `${config.baseUrl}/v2/orders?status=open&symbols=${encodeURIComponent(posSymbol)}&limit=100`,
+        { headers }
+      );
+      if (ordersResp.ok) {
+        const orders = await ordersResp.json() as Array<Record<string, string>>;
+        const stopOrders = orders.filter((o) => o.type === "stop" || o.type === "stop_limit");
+        for (const order of stopOrders) {
+          await fetch(`${config.baseUrl}/v2/orders/${order.id}`, { method: "DELETE", headers });
+        }
+        if (stopOrders.length > 0) {
+          logger.info("[ALPACA] updateStopLoss: cancelled existing stop orders", { symbol, count: stopOrders.length });
+        }
+      }
+    } catch (cancelErr) {
+      logger.warn("[ALPACA] updateStopLoss: cancel error (non-fatal)", { symbol, error: String(cancelErr) });
+    }
+
+    // 3. Place new stop order (stop_limit with 1% buffer below stop)
+    const limitPrice = (newStopPrice * 0.99).toFixed(2);
+    const stopPriceStr = newStopPrice.toFixed(2);
+    const orderBody: Record<string, unknown> = {
+      symbol: posSymbol,
+      qty,
+      side: "sell",
+      type: "stop_limit",
+      stop_price: stopPriceStr,
+      limit_price: limitPrice,
+      time_in_force: "gtc",
+    };
+
+    try {
+      const orderResp = await fetch(`${config.baseUrl}/v2/orders`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(orderBody),
+      });
+      const data = await orderResp.json() as Record<string, unknown>;
+      if (!orderResp.ok) {
+        const msg = (data.message || data.code || "unknown error") as string;
+        logger.error("[ALPACA] updateStopLoss: order failed", { symbol, data });
+        await getFirestore().collection("broker_errors").add({
+          broker: "alpaca",
+          action: "updateStopLoss",
+          symbol,
+          stopPrice: newStopPrice,
+          error: `Failed to place stop order: ${msg}`,
+          raw: JSON.stringify(data).slice(0, 1000),
+          timestamp: FieldValue.serverTimestamp(),
+        });
+        return { success: false, message: `Failed to place stop order: ${msg}` };
+      }
+      const orderId = data.id as string | undefined;
+      logger.info("[ALPACA] updateStopLoss: stop order placed", { symbol, orderId, stopPrice: newStopPrice });
+      return { success: true, orderId, message: `Stop loss updated to $${newStopPrice.toFixed(2)}` };
+    } catch (err) {
+      logger.error("[ALPACA] updateStopLoss error", { err: String(err) });
+      await getFirestore().collection("broker_errors").add({
+        broker: "alpaca",
+        action: "updateStopLoss",
+        symbol,
+        stopPrice: newStopPrice,
+        error: String(err),
+        timestamp: FieldValue.serverTimestamp(),
+      });
+      return { success: false, message: `Error: ${String(err)}` };
+    }
+  }
 }
