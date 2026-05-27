@@ -197,12 +197,34 @@ export default function SignalInboxScreen({ navigation }: Props) {
                     ${d.price < 1 ? d.price.toPrecision(4) : d.price.toFixed(4)}
                   </Text>
                 )}
+                {d.broker != null && (
+                  <Text style={styles.decisionBroker}>{d.broker}</Text>
+                )}
                 <Text style={styles.decisionTime}>
                   {d.createdAt?._seconds
                     ? new Date(d.createdAt._seconds * 1000).toLocaleTimeString()
                     : ""}
                 </Text>
               </View>
+              {/* Book analysis row */}
+              {d.bookScore != null && (
+                <View style={styles.decisionBookRow}>
+                  <Text style={[
+                    styles.decisionBookScore,
+                    { color: d.bookSignal === "buy" ? "#5cb85c" : d.bookSignal === "sell" ? "#d9534f" : "#888" },
+                  ]}>
+                    📖 Book {d.bookScore > 0 ? "+" : ""}{d.bookScore}/4 ({d.bookSignal ?? "?"})
+                  </Text>
+                  {d.volumeSpike != null && (
+                    <Text style={[
+                      styles.decisionVolumeTag,
+                      { color: d.volumeSpike ? "#5cb85c" : "#f0ad4e" },
+                    ]}>
+                      Vol {d.volumeSpike ? `▲${d.volumeRatio?.toFixed(1)}x` : `▼${d.volumeRatio?.toFixed(1)}x`}
+                    </Text>
+                  )}
+                </View>
+              )}
               {d.reasons.map((r, i) => (
                 <Text key={i} style={styles.decisionReason}>
                   • {r}
@@ -355,5 +377,24 @@ const styles = StyleSheet.create({
     color: "#777",
     fontSize: 11,
     lineHeight: 16,
+  },
+  decisionBroker: {
+    color: "#555",
+    fontSize: 11,
+    fontStyle: "italic",
+  },
+  decisionBookRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  decisionBookScore: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  decisionVolumeTag: {
+    fontSize: 11,
+    fontWeight: "600",
   },
 });

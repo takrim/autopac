@@ -97,6 +97,192 @@ export class CoinbaseBroker implements IBroker {
     return `${base}-USD`;
   }
 
+  /**
+   * Poll Coinbase until the order is FILLED or CANCELLED/EXPIRED.
+   * Returns { status, filledSize } where filledSize is in base currency.
+   * Polls up to maxAttempts times with intervalMs between each.
+   */
+  private async pollOrderFill(
+    orderId: string,
+    maxAttempts = 15,
+    intervalMs = 2000
+  ): Promise<{ status: string; filledSize: string }> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      try {
+        const { ok, data } = await this.request("GET", `/orders/historical/${orderId}`);
+        if (ok) {
+          const order = data.order as Record<string, unknown> | undefined;
+          if (order) {
+            const status = (order.status as string) || "";
+            const filledSize = (order.filled_size as string) || "0";
+            if (status === "FILLED" || status === "CANCELLED" || status === "EXPIRED" || status === "FAILED") {
+              logger.info("[COINBASE] pollOrderFill result", { orderId, status, filledSize, attempt });
+              return { status, filledSize };
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn("[COINBASE] pollOrderFill error", { attempt, orderId, err: String(err) });
+      }
+    }
+    // Timed out — assume unknown
+    logger.warn("[COINBASE] pollOrderFill timed out", { orderId });
+    return { status: "UNKNOWN", filledSize: "0" };
+  }
+
+  /**
+   * Attempt a post-only (maker) limit BUY at the current best bid.
+   *
+   * Returns a `PlaceOrderResult` on success/partial-fill, or `null` if the
+   * caller should fall back to a market order (e.g. order book empty, post-only
+   * was rejected for crossing, or timed out with zero fill).
+   *
+   * Maker fee (0.25%) vs. taker (0.5%) → saves 0.25% per fill that lands here.
+   */
+  private async tryMakerFirstBuy(params: PlaceOrderParams): Promise<PlaceOrderResult | null> {
+    const productId = this.toProductId(params.symbol);
+    const tradeValue = params.tradeValueUsd || CONFIG.TRADE_VALUE_USD;
+
+    // 1. Fetch best bid from the order book
+    let bestBidStr = "";
+    try {
+      const { ok, data } = await this.request("GET", `/product_book?product_id=${productId}&limit=1`);
+      if (!ok) {
+        logger.warn("[COINBASE] makerFirst: product_book failed", { productId });
+        return null;
+      }
+      const pb = data.pricebook as Record<string, Array<{ price: string; size: string }>> | undefined;
+      const topBid = pb?.bids?.[0]?.price;
+      if (!topBid) {
+        logger.warn("[COINBASE] makerFirst: no bids in book", { productId });
+        return null;
+      }
+      bestBidStr = topBid;
+    } catch (err) {
+      logger.warn("[COINBASE] makerFirst: product_book error", { productId, err: String(err) });
+      return null;
+    }
+
+    // 2. Submit post-only limit BUY at best bid (price string is already tick-aligned by Coinbase)
+    const clientOrderId = crypto.randomUUID();
+    const body: Record<string, unknown> = {
+      client_order_id: clientOrderId,
+      product_id: productId,
+      side: "BUY",
+      order_configuration: {
+        limit_limit_gtc: {
+          quote_size: tradeValue.toFixed(4),
+          limit_price: bestBidStr,
+          post_only: true,
+        },
+      },
+    };
+
+    let orderId = "";
+    try {
+      logger.info("[COINBASE] makerFirst: placing post-only limit BUY", { productId, bestBidStr, tradeValue });
+      const { ok, data } = await this.request("POST", "/orders", body);
+      if (!ok || data.success === false) {
+        const errResp = data.error_response as Record<string, unknown> | undefined;
+        const errMsg = (errResp?.message as string) || (errResp?.preview_failure_reason as string) || "unknown";
+        logger.info("[COINBASE] makerFirst: post-only rejected — will fall back", { productId, errMsg });
+        return null;
+      }
+      const successResp = data.success_response as Record<string, unknown> | undefined;
+      orderId = (successResp?.order_id || clientOrderId) as string;
+    } catch (err) {
+      logger.warn("[COINBASE] makerFirst: place error", { productId, err: String(err) });
+      return null;
+    }
+
+    // 3. Poll for fill — shorter window than taker IOC since we're racing the bid
+    //    6 attempts × 1500ms = ~9s. If price runs away the order won't fill; we cancel and fall back.
+    const { status: fillStatus, filledSize } = await this.pollOrderFill(orderId, 6, 1500);
+
+    if (fillStatus === "FILLED" && parseFloat(filledSize) > 0) {
+      logger.info("[COINBASE] makerFirst: filled at bid (maker fee)", { orderId, filledSize, bestBidStr });
+
+      if (params.stopLoss) {
+        await this.placeStopLossWithSize(productId, params.stopLoss, filledSize, orderId);
+      }
+
+      const db = getFirestore();
+      await db.collection("orders").add({
+        signalId: orderId,
+        broker: "coinbase",
+        orderType: "limit",
+        side: "BUY",
+        symbol: params.symbol,
+        quantity: parseFloat(filledSize),
+        status: "FILLED",
+        responsePayload: { maker_first: true, limit_price: bestBidStr, filled_size: filledSize },
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return {
+        success: true,
+        orderId,
+        status: "FILLED",
+        message: `Maker BUY filled @ ${bestBidStr} (qty: ${filledSize})`,
+        raw: { maker_first: true, limit_price: bestBidStr, filled_size: filledSize },
+      };
+    }
+
+    // 4. Did not fill in window — cancel and check for any partial fill
+    try {
+      await this.request("POST", "/orders/batch_cancel", { order_ids: [orderId] });
+      logger.info("[COINBASE] makerFirst: cancelled unfilled post-only", { orderId, fillStatus, filledSize });
+    } catch (cancelErr) {
+      logger.warn("[COINBASE] makerFirst: cancel error (non-fatal)", { orderId, err: String(cancelErr) });
+    }
+
+    // Re-check final state for partial fill
+    try {
+      const { ok, data } = await this.request("GET", `/orders/historical/${orderId}`);
+      if (ok) {
+        const order = data.order as Record<string, unknown> | undefined;
+        const finalFilled = (order?.filled_size as string) || "0";
+        if (parseFloat(finalFilled) > 0) {
+          logger.info("[COINBASE] makerFirst: partial maker fill kept (no taker top-up)", {
+            orderId, filledSize: finalFilled,
+          });
+
+          if (params.stopLoss) {
+            await this.placeStopLossWithSize(productId, params.stopLoss, finalFilled, orderId);
+          }
+
+          const db = getFirestore();
+          await db.collection("orders").add({
+            signalId: orderId,
+            broker: "coinbase",
+            orderType: "limit",
+            side: "BUY",
+            symbol: params.symbol,
+            quantity: parseFloat(finalFilled),
+            status: "FILLED",
+            responsePayload: { maker_first: true, partial: true, limit_price: bestBidStr, filled_size: finalFilled },
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+
+          return {
+            success: true,
+            orderId,
+            status: "FILLED",
+            message: `Maker BUY partially filled @ ${bestBidStr} (qty: ${finalFilled})`,
+            raw: { maker_first: true, partial: true, limit_price: bestBidStr, filled_size: finalFilled },
+          };
+        }
+      }
+    } catch {
+      // ignore — proceed to fall back
+    }
+
+    return null; // signal to placeOrder to fall back to market
+  }
+
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     const config = this.getConfig();
 
@@ -107,6 +293,17 @@ export class CoinbaseBroker implements IBroker {
         status: "FAILED",
         message: "Coinbase CDP API credentials not configured",
       };
+    }
+
+    // Maker-first BUYs: try to fill at the bid as a post-only limit (0.25% fee),
+    // fall back to a normal market order (0.5% fee) if it doesn't fill in time.
+    if (params.makerFirst && params.side === "BUY" && params.orderType === "market") {
+      const makerResult = await this.tryMakerFirstBuy(params);
+      if (makerResult) return makerResult;
+      logger.info("[COINBASE] Maker-first BUY did not fill — falling back to market", {
+        symbol: params.symbol,
+      });
+      // fall through to standard market path below
     }
 
     const productId = this.toProductId(params.symbol);
@@ -134,14 +331,16 @@ export class CoinbaseBroker implements IBroker {
         };
       }
     } else {
-      // Limit order: use limit_limit_gtc
+      // Limit order: use limit_limit_gtc with post_only=true so the caller
+      // gets the maker fee tier. If the limit would cross the spread, Coinbase
+      // rejects the order — callers asking for a limit already accept that.
       const limitPrice = params.limitPrice || tradeValue / params.quantity;
       if (side === "BUY") {
         orderConfiguration = {
           limit_limit_gtc: {
             quote_size: tradeValue.toFixed(4),
             limit_price: limitPrice.toFixed(4),
-            post_only: false,
+            post_only: true,
           },
         };
       } else {
@@ -149,7 +348,7 @@ export class CoinbaseBroker implements IBroker {
           limit_limit_gtc: {
             base_size: params.quantity.toString(),
             limit_price: limitPrice.toFixed(4),
-            post_only: false,
+            post_only: true,
           },
         };
       }
@@ -187,11 +386,29 @@ export class CoinbaseBroker implements IBroker {
       const successResponse = data.success_response as Record<string, unknown> | undefined;
       const orderId = (successResponse?.order_id || clientOrderId) as string;
 
-      logger.info("[COINBASE] Order placed", { orderId, productId, side });
+      logger.info("[COINBASE] Order submitted, polling for fill", { orderId, productId, side });
 
-      // If stop loss is requested, place a stop-limit order
+      // Poll for actual fill status — IOC market orders may be silently cancelled
+      const { status: fillStatus, filledSize } = await this.pollOrderFill(orderId);
+
+      const actuallyFilled = fillStatus === "FILLED" && parseFloat(filledSize) > 0;
+
+      if (!actuallyFilled) {
+        logger.warn("[COINBASE] Order not filled", { orderId, fillStatus, filledSize, productId });
+        return {
+          success: false,
+          orderId,
+          status: "FAILED",
+          message: `Order was not filled (status: ${fillStatus}). The asset may have insufficient liquidity or be in limit-only mode.`,
+          raw: data,
+        };
+      }
+
+      logger.info("[COINBASE] Order filled", { orderId, filledSize, productId, side });
+
+      // If stop loss is requested, place it now using confirmed filled size
       if (params.stopLoss && side === "BUY") {
-        await this.placeStopLoss(productId, params.stopLoss, params.quantity, orderId);
+        await this.placeStopLossWithSize(productId, params.stopLoss, filledSize, orderId);
       }
 
       const db = getFirestore();
@@ -201,9 +418,9 @@ export class CoinbaseBroker implements IBroker {
         orderType: params.orderType,
         side: params.side,
         symbol: params.symbol,
-        quantity: params.quantity,
+        quantity: parseFloat(filledSize),
         status: "FILLED",
-        responsePayload: data,
+        responsePayload: { ...data, filled_size: filledSize },
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -212,7 +429,7 @@ export class CoinbaseBroker implements IBroker {
         success: true,
         orderId,
         status: "FILLED",
-        message: "Order placed on Coinbase",
+        message: `Order filled on Coinbase (qty: ${filledSize})`,
         raw: data,
       };
     } catch (err) {
@@ -227,54 +444,20 @@ export class CoinbaseBroker implements IBroker {
   }
 
   /**
-   * Place a stop-limit sell order as a protective stop loss.
-   * Uses stop_limit_stop_limit_gtc with STOP_DIRECTION_STOP_DOWN.
+   * Place a stop-limit sell order given an already-confirmed filled base size.
    */
-  private async placeStopLoss(
+  private async placeStopLossWithSize(
     productId: string,
     stopPrice: number,
-    quantity: number,
+    baseSize: string,
     parentOrderId: string
   ): Promise<void> {
-    // Wait for the entry order to fill before placing SL
-    // Poll for up to 30 seconds
-    let baseSize: string | null = null;
-    const maxAttempts = 15;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const { ok, data } = await this.request("GET", `/orders/historical/${parentOrderId}`);
-        if (ok) {
-          const order = data.order as Record<string, unknown> | undefined;
-          if (order && order.status === "FILLED") {
-            const filledSize = order.filled_size as string;
-            if (filledSize && parseFloat(filledSize) > 0) {
-              baseSize = filledSize;
-              break;
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn("[COINBASE] SL poll error", { attempt, err: String(err) });
-      }
-    }
-
     if (!baseSize || parseFloat(baseSize) <= 0) {
-      logger.error("[COINBASE] Could not get filled size for SL", { productId });
-      const db = getFirestore();
-      await db.collection("broker_errors").add({
-        signalId: parentOrderId,
-        broker: "coinbase",
-        symbol: productId,
-        side: "SELL",
-        orderType: "sl_skipped",
-        error: "Could not determine filled size after waiting",
-        timestamp: FieldValue.serverTimestamp(),
-      });
+      logger.error("[COINBASE] placeStopLossWithSize: invalid baseSize", { productId, baseSize });
       return;
     }
 
-    // Stop-limit: trigger at stopPrice, limit slightly below (1% buffer)
+    // Stop-limit: trigger at stopPrice, limit 1% below as buffer
     const limitPrice = (stopPrice * 0.99).toFixed(4);
     const slBody: Record<string, unknown> = {
       client_order_id: crypto.randomUUID(),
@@ -294,6 +477,15 @@ export class CoinbaseBroker implements IBroker {
       const { ok, data } = await this.request("POST", "/orders", slBody);
       if (!ok || data.success === false) {
         logger.error("[COINBASE] SL order failed", { data });
+        const db = getFirestore();
+        await db.collection("broker_errors").add({
+          signalId: parentOrderId,
+          broker: "coinbase",
+          symbol: productId,
+          side: "SELL",
+          error: `Failed to place new stop loss: ${(data.error_response as any)?.message || JSON.stringify(data).slice(0, 200)}`,
+          timestamp: FieldValue.serverTimestamp(),
+        });
       } else {
         const slResponse = data.success_response as Record<string, unknown> | undefined;
         logger.info("[COINBASE] SL order placed", { orderId: slResponse?.order_id, stopPrice });
@@ -919,4 +1111,136 @@ export class CoinbaseBroker implements IBroker {
 
     return { ...result, exclusive };
   }
+
+  /**
+   * Fetch OHLCV candles for a product.
+   * Returns candles sorted oldest-first (ascending by start time).
+   */
+  async getCandles(
+    productId: string,
+    granularity: "ONE_MINUTE" | "FIVE_MINUTE" | "FIFTEEN_MINUTE" | "ONE_HOUR",
+    count: number
+  ): Promise<CbCandle[]> {
+    const granSeconds: Record<string, number> = {
+      ONE_MINUTE: 60,
+      FIVE_MINUTE: 300,
+      FIFTEEN_MINUTE: 900,
+      ONE_HOUR: 3600,
+    };
+    const step = granSeconds[granularity] ?? 60;
+    const end = Math.floor(Date.now() / 1000);
+    const start = end - step * (count + 2); // fetch a bit extra
+
+    const { ok, data } = await this.request(
+      "GET",
+      `/products/${productId}/candles?start=${start}&end=${end}&granularity=${granularity}&limit=350`
+    );
+    if (!ok || !Array.isArray(data.candles)) return [];
+
+    const candles: CbCandle[] = (data.candles as Array<Record<string, string>>).map((c) => ({
+      start: parseInt(c.start),
+      low: parseFloat(c.low),
+      high: parseFloat(c.high),
+      open: parseFloat(c.open),
+      close: parseFloat(c.close),
+      volume: parseFloat(c.volume),
+    }));
+
+    // Sort ascending (oldest first) for RSI calculation
+    candles.sort((a, b) => a.start - b.start);
+    return candles.slice(-count);
+  }
+
+  /**
+   * Fetch order book depth and return bid/ask volume ratio.
+   * ratio > 1 = more buy pressure; ratio < 1 = more sell pressure.
+   */
+  async getOrderBook(productId: string, depth = 10): Promise<{ bidVolume: number; askVolume: number; ratio: number }> {
+    const { ok, data } = await this.request("GET", `/product_book?product_id=${productId}&limit=${depth}`);
+    if (!ok) return { bidVolume: 0, askVolume: 0, ratio: 1 };
+    const pb = data.pricebook as Record<string, Array<{ price: string; size: string }>> | undefined;
+    if (!pb) return { bidVolume: 0, askVolume: 0, ratio: 1 };
+    const bidVolume = (pb.bids || []).reduce((s, b) => s + parseFloat(b.size), 0);
+    const askVolume = (pb.asks || []).reduce((s, a) => s + parseFloat(a.size), 0);
+    const ratio = askVolume > 0 ? bidVolume / askVolume : 1;
+    return { bidVolume, askVolume, ratio };
+  }
+
+  /**
+   * Fetch the top 24h gainers listed on Coinbase (SPOT USD pairs).
+   * Used to supplement CoinGecko candidates and boost scores for coins trending on both platforms.
+   */
+  async getMarketGainers(limit = 50): Promise<{
+    topGainers: Array<{ productId: string; symbol: string; change24h: number; price: number; volumeUsd: number }>;
+  }> {
+    const { ok, data } = await this.request("GET", "/products?product_type=SPOT&limit=250");
+    if (!ok || !Array.isArray(data?.products)) return { topGainers: [] };
+
+    const usdProducts = (data.products as Array<Record<string, string>>).filter(
+      p => p.quote_currency_id === "USD" && p.status === "online"
+    );
+
+    const topGainers = usdProducts
+      .map(p => ({
+        productId: p.product_id,
+        symbol: p.base_currency_id,
+        change24h: parseFloat(p.price_percentage_change_24h ?? "0"),
+        price: parseFloat(p.price ?? "0"),
+        volumeUsd: parseFloat(p.volume_24h ?? "0") * parseFloat(p.price ?? "0"),
+      }))
+      .filter(p => p.change24h > 0)
+      .sort((a, b) => b.change24h - a.change24h)
+      .slice(0, limit);
+
+    return { topGainers };
+  }
+
+  /**
+   * Fetch the top-N tradeable Coinbase SPOT pairs by 24h USD volume.
+   * USD-quoted only — USDC pairs are duplicates of USD pairs (e.g. BTC-USDC
+   * vs BTC-USD) and would crowd out distinct symbols from the universe.
+   * Filters disabled / non-online products and any with price <= 0. Used by
+   * the EMA pullback scanner to build its symbol universe each tick.
+   */
+  async getTopByVolume(limit = 30): Promise<Array<{
+    productId: string;
+    symbol: string;
+    price: number;
+    volumeUsd: number;
+    change24h: number;
+  }>> {
+    const { ok, data } = await this.request("GET", "/products?product_type=SPOT&limit=400");
+    if (!ok || !Array.isArray(data?.products)) return [];
+
+    const products = data.products as Array<Record<string, string | boolean | undefined>>;
+    const rows: Array<{ productId: string; symbol: string; price: number; volumeUsd: number; change24h: number }> = [];
+    for (const p of products) {
+      if (p.is_disabled === true || p.trading_disabled === true) continue;
+      if ((p.status as string) !== "online") continue;
+      if ((p.quote_currency_id as string | undefined) !== "USD") continue;
+      const price = parseFloat((p.price as string) ?? "0");
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const vol = parseFloat((p.volume_24h as string) ?? "0");
+      const volumeUsd = vol * price;
+      if (!Number.isFinite(volumeUsd) || volumeUsd <= 0) continue;
+      rows.push({
+        productId: p.product_id as string,
+        symbol: p.base_currency_id as string,
+        price,
+        volumeUsd,
+        change24h: parseFloat((p.price_percentage_change_24h as string) ?? "0"),
+      });
+    }
+    rows.sort((a, b) => b.volumeUsd - a.volumeUsd);
+    return rows.slice(0, limit);
+  }
+}
+
+export interface CbCandle {
+  start: number;
+  low: number;
+  high: number;
+  open: number;
+  close: number;
+  volume: number;
 }

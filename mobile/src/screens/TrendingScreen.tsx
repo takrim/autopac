@@ -14,7 +14,7 @@ import {
   Alert,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { TrendingCrypto, fetchTrending, fetchConfig, updateConfig, TradingConfig } from "../services/api";
+import { TrendingCrypto, BookAnalysis, fetchTrending, fetchConfig, updateConfig, TradingConfig, placeManualOrder, fetchBookAnalysis } from "../services/api";
 
 type SortMode = "price_change" | "gainers" | "losers" | "volume";
 
@@ -30,10 +30,13 @@ export default function TrendingScreen() {
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortMode>("price_change");
   const [selectedItem, setSelectedItem] = useState<TrendingCrypto | null>(null);
+  const [bookAnalysis, setBookAnalysis] = useState<BookAnalysis | null>(null);
+  const [bookLoading, setBookLoading] = useState(false);
   const [allowedSymbols, setAllowedSymbols] = useState<string[]>([]);
   const [activeBroker, setActiveBroker] = useState<string>("coinbase");
   const [toggling, setToggling] = useState<string | null>(null);
   const [showAllowedOnly, setShowAllowedOnly] = useState(false);
+  const [ordering, setOrdering] = useState<string | null>(null);
   const configRef = useRef<TradingConfig | null>(null);
 
   const loadData = useCallback(async () => {
@@ -96,6 +99,36 @@ export default function TrendingScreen() {
     }
   }, [allowedSymbols, activeBroker]);
 
+  const handleManualBuy = useCallback((productId: string, price: number) => {
+    const ticker = toTickerSymbol(productId);
+    Alert.alert(
+      "Manual Buy",
+      `Buy ${ticker} at ~$${price.toFixed(price >= 1 ? 2 : 6)}?\n\nThis will use your configured trade value and place a market order with stop loss.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Buy",
+          onPress: async () => {
+            setOrdering(productId);
+            try {
+              const result = await placeManualOrder(ticker, "BUY", price);
+              Alert.alert(
+                result.status === "executed" ? "Order Placed" : "Order Failed",
+                result.status === "executed"
+                  ? `Bought ${ticker} at $${result.price.toFixed(price >= 1 ? 2 : 6)}\nSL: $${result.stopLoss.toFixed(price >= 1 ? 2 : 6)}`
+                  : `Failed: ${result.status}`
+              );
+            } catch (err: any) {
+              Alert.alert("Error", err.message || "Failed to place order");
+            } finally {
+              setOrdering(null);
+            }
+          },
+        },
+      ]
+    );
+  }, []);
+
   const onRefresh = () => {
     setRefreshing(true);
     loadData();
@@ -140,7 +173,15 @@ export default function TrendingScreen() {
     const isTogglingThis = toggling === item.symbol;
 
     return (
-      <TouchableOpacity style={styles.row} onPress={() => setSelectedItem(item)}>
+      <TouchableOpacity style={styles.row} onPress={() => {
+        setSelectedItem(item);
+        setBookAnalysis(null);
+        setBookLoading(true);
+        fetchBookAnalysis(item.symbol)
+          .then(setBookAnalysis)
+          .catch(() => setBookAnalysis(null))
+          .finally(() => setBookLoading(false));
+      }}>
         <View style={styles.rankCol}>
           <Text style={styles.rank}>{index + 1}</Text>
         </View>
@@ -181,6 +222,20 @@ export default function TrendingScreen() {
             </Text>
           )}
         </TouchableOpacity>
+
+        {isAllowed && (
+          <TouchableOpacity
+            style={styles.buyBtn}
+            onPress={() => handleManualBuy(item.symbol, item.price)}
+            disabled={ordering === item.symbol}
+          >
+            {ordering === item.symbol ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.buyBtnText}>Buy</Text>
+            )}
+          </TouchableOpacity>
+        )}
 
         <View style={[styles.changeCol, { backgroundColor: changeColor + "20" }]}>
           <Text style={[styles.change, { color: changeColor }]}>
@@ -316,6 +371,98 @@ export default function TrendingScreen() {
                   ) : null}
                 </View>
 
+                {/* Book Analysis */}
+                <View style={styles.bookSection}>
+                  <Text style={styles.sectionTitle}>📖 Order Book Analysis</Text>
+                  {bookLoading ? (
+                    <ActivityIndicator size="small" color="#e94560" style={{ marginTop: 8 }} />
+                  ) : bookAnalysis ? (
+                    <>
+                      {/* Score + Recommendation */}
+                      <View style={styles.bookScoreRow}>
+                        <View style={[
+                          styles.bookScoreBadge,
+                          { backgroundColor: bookAnalysis.score >= 1 ? "#4caf5030" : bookAnalysis.score <= -1 ? "#e9456030" : "#88888830" },
+                        ]}>
+                          <Text style={[
+                            styles.bookScoreText,
+                            { color: bookAnalysis.score >= 1 ? "#4caf50" : bookAnalysis.score <= -1 ? "#e94560" : "#aaa" },
+                          ]}>
+                            {bookAnalysis.score >= 0 ? "+" : ""}{bookAnalysis.score}/4
+                          </Text>
+                        </View>
+                        <Text style={[
+                          styles.bookRecommendation,
+                          { color: bookAnalysis.score >= 1 ? "#4caf50" : bookAnalysis.score <= -1 ? "#e94560" : "#aaa" },
+                        ]}>
+                          {bookAnalysis.recommendation}
+                        </Text>
+                      </View>
+
+                      {/* Stats grid */}
+                      <View style={styles.statsGrid}>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Bid Pressure</Text>
+                          <Text style={[styles.statValue, { color: bookAnalysis.bidPct >= 55 ? "#4caf50" : bookAnalysis.bidPct <= 45 ? "#e94560" : "#fff" }]}>
+                            {bookAnalysis.bidPct.toFixed(1)}%
+                          </Text>
+                        </View>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Ask Pressure</Text>
+                          <Text style={[styles.statValue, { color: bookAnalysis.askPct >= 55 ? "#e94560" : bookAnalysis.askPct <= 45 ? "#4caf50" : "#fff" }]}>
+                            {bookAnalysis.askPct.toFixed(1)}%
+                          </Text>
+                        </View>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Spread</Text>
+                          <Text style={styles.statValue}>{bookAnalysis.spread.toFixed(3)}%</Text>
+                        </View>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Imbalance</Text>
+                          <Text style={[styles.statValue, { color: bookAnalysis.imbalanceRatio > 1.3 ? "#4caf50" : bookAnalysis.imbalanceRatio < 0.77 ? "#e94560" : "#fff" }]}>
+                            {bookAnalysis.imbalanceRatio.toFixed(2)}x
+                          </Text>
+                        </View>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Bid Depth ±1%</Text>
+                          <Text style={styles.statValue}>{formatVolume(bookAnalysis.depth1pctBidUsd)}</Text>
+                        </View>
+                        <View style={styles.statItem}>
+                          <Text style={styles.statLabel}>Ask Depth ±1%</Text>
+                          <Text style={styles.statValue}>{formatVolume(bookAnalysis.depth1pctAskUsd)}</Text>
+                        </View>
+                        {bookAnalysis.topBidWall && (
+                          <View style={styles.statItem}>
+                            <Text style={styles.statLabel}>Top Bid Wall</Text>
+                            <Text style={[styles.statValue, { color: "#4caf50" }]}>
+                              ${bookAnalysis.topBidWall.price.toFixed(bookAnalysis.topBidWall.price >= 1 ? 2 : 6)}{"\n"}{formatVolume(bookAnalysis.topBidWall.sizeUsd)}
+                            </Text>
+                          </View>
+                        )}
+                        {bookAnalysis.topAskWall && (
+                          <View style={styles.statItem}>
+                            <Text style={styles.statLabel}>Top Ask Wall</Text>
+                            <Text style={[styles.statValue, { color: "#e94560" }]}>
+                              ${bookAnalysis.topAskWall.price.toFixed(bookAnalysis.topAskWall.price >= 1 ? 2 : 6)}{"\n"}{formatVolume(bookAnalysis.topAskWall.sizeUsd)}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Reasons */}
+                      {bookAnalysis.reasons.length > 0 && (
+                        <View style={styles.reasonsBox}>
+                          {bookAnalysis.reasons.map((r, i) => (
+                            <Text key={i} style={styles.reasonText}>• {r}</Text>
+                          ))}
+                        </View>
+                      )}
+                    </>
+                  ) : (
+                    <Text style={styles.bookUnavailable}>Book data unavailable</Text>
+                  )}
+                </View>
+
                 {/* Description */}
                 {selectedItem.description ? (
                   <View style={styles.descriptionSection}>
@@ -333,6 +480,28 @@ export default function TrendingScreen() {
                     <Text style={styles.websiteButtonText}>Visit Website →</Text>
                   </TouchableOpacity>
                 ) : null}
+
+                {/* Manual Buy button */}
+                {(() => {
+                  const ticker = toTickerSymbol(selectedItem.symbol);
+                  const isAllowed = allowedSymbols.includes(ticker);
+                  const isOrdering = ordering === selectedItem.symbol;
+                  return isAllowed ? (
+                    <TouchableOpacity
+                      style={styles.buyModalBtn}
+                      onPress={() => handleManualBuy(selectedItem.symbol, selectedItem.price)}
+                      disabled={isOrdering}
+                    >
+                      {isOrdering ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={styles.buyModalBtnText}>
+                          Buy {ticker} at {formatPrice(selectedItem.price)}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  ) : null;
+                })()}
 
                 {/* Allowlist toggle */}
                 {(() => {
@@ -434,6 +603,16 @@ const styles = StyleSheet.create({
   sectionTitle: { color: "#fff", fontSize: 18, fontWeight: "bold", marginBottom: 10 },
   descriptionText: { color: "#ccc", fontSize: 14, lineHeight: 22 },
 
+  // Book analysis section
+  bookSection: { backgroundColor: "#16213e", borderRadius: 12, padding: 14, marginBottom: 16 },
+  bookScoreRow: { flexDirection: "row", alignItems: "center", marginBottom: 12, gap: 12 },
+  bookScoreBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
+  bookScoreText: { fontSize: 18, fontWeight: "bold" },
+  bookRecommendation: { fontSize: 17, fontWeight: "700" },
+  reasonsBox: { marginTop: 10, backgroundColor: "#0f3460", borderRadius: 8, padding: 10 },
+  reasonText: { color: "#ccc", fontSize: 13, lineHeight: 20 },
+  bookUnavailable: { color: "#888", fontSize: 13, marginTop: 6 },
+
   websiteButton: { backgroundColor: "#16213e", padding: 14, borderRadius: 12, alignItems: "center", marginBottom: 12 },
   websiteButtonText: { color: "#e94560", fontSize: 15, fontWeight: "600" },
 
@@ -448,4 +627,10 @@ const styles = StyleSheet.create({
   allowlistModalBtn: { backgroundColor: "#16213e", padding: 14, borderRadius: 12, alignItems: "center", marginBottom: 12, borderWidth: 1.5, borderColor: "#0f3460" },
   allowlistModalBtnActive: { borderColor: "#4caf50", backgroundColor: "#4caf5020" },
   allowlistModalBtnText: { color: "#fff", fontSize: 15, fontWeight: "600" },
+
+  // Buy buttons
+  buyBtn: { backgroundColor: "#4caf50", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, marginRight: 6, justifyContent: "center", alignItems: "center", minWidth: 36 },
+  buyBtnText: { color: "#fff", fontSize: 11, fontWeight: "bold" },
+  buyModalBtn: { backgroundColor: "#4caf50", padding: 14, borderRadius: 12, alignItems: "center", marginBottom: 12 },
+  buyModalBtnText: { color: "#fff", fontSize: 15, fontWeight: "bold" },
 });

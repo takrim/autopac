@@ -13,7 +13,7 @@ import {
   SafeAreaView,
   Pressable,
 } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
   AlpacaAccount,
   Position,
@@ -28,6 +28,7 @@ import {
 } from "../services/api";
 
 export default function DashboardScreen() {
+  const navigation = useNavigation<any>();
   const [account, setAccount] = useState<AlpacaAccount | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [cashBalance, setCashBalance] = useState(0);
@@ -335,7 +336,12 @@ export default function DashboardScreen() {
           const pl = parseFloat(pos.unrealized_pl || "0");
           const plPct = parseFloat(pos.unrealized_plpc || "0") * 100;
           return (
-            <View key={pos.symbol} style={styles.posCard}>
+            <TouchableOpacity
+              key={pos.symbol}
+              style={styles.posCard}
+              activeOpacity={0.7}
+              onPress={() => navigation.navigate("PositionDetailModal", { position: pos })}
+            >
               <View style={styles.posHeader}>
                 <Text style={styles.posSymbol}>{pos.symbol}</Text>
                 <Text style={[styles.posPl, { color: pl >= 0 ? "#5cb85c" : "#d9534f" }]}>
@@ -347,7 +353,7 @@ export default function DashboardScreen() {
                 <Text style={styles.posDetail}>Entry: ${parseFloat(pos.avg_entry_price).toFixed(2)}</Text>
                 <Text style={styles.posDetail}>Now: ${parseFloat(pos.current_price).toFixed(2)}</Text>
               </View>
-            </View>
+            </TouchableOpacity>
           );
         })
       )}

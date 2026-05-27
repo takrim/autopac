@@ -17,6 +17,8 @@ export interface IndicatorResult {
   vwapTrend: "bullish" | "bearish" | "neutral" | null;
   currentPrice: number | null;
   support: number | null;
+  volumeSpike: boolean | null;   // true if last bar volume ≥ 1.5× 20-bar avg
+  volumeRatio: number | null;    // last bar volume / 20-bar avg volume
 }
 
 /**
@@ -103,7 +105,7 @@ async function fetchCoinbase15MinCandles(symbol: string): Promise<Bar[]> {
  * Falls back to Coinbase candles if Alpaca has insufficient data and activeBroker is "coinbase".
  */
 export async function calculateIndicators(symbol: string, currentPrice: number, activeBroker?: string): Promise<IndicatorResult> {
-  const result: IndicatorResult = { rsi: null, vwap: null, vwapTrend: null, currentPrice, support: null };
+  const result: IndicatorResult = { rsi: null, vwap: null, vwapTrend: null, currentPrice, support: null, volumeSpike: null, volumeRatio: null };
 
   try {
     const config = getAlpacaConfig();
@@ -179,6 +181,15 @@ export async function calculateIndicators(symbol: string, currentPrice: number, 
     }
 
     logger.info("[INDICATORS] Calculated", { symbol, rsi: result.rsi?.toFixed(1), vwap: result.vwap?.toFixed(4), vwapTrend: result.vwapTrend });
+
+    // Volume spike: last bar vs 20-bar average
+    if (bars.length >= 21) {
+      const last = bars[bars.length - 1];
+      const avg20 = bars.slice(-21, -1).reduce((s, b) => s + b.v, 0) / 20;
+      result.volumeRatio = avg20 > 0 ? parseFloat((last.v / avg20).toFixed(2)) : null;
+      result.volumeSpike = result.volumeRatio !== null && result.volumeRatio >= 1.5;
+      logger.info("[INDICATORS] Volume spike", { symbol, lastVol: last.v.toFixed(2), avg20: avg20.toFixed(2), ratio: result.volumeRatio, spike: result.volumeSpike });
+    }
 
     // Calculate support level from 15-min candles (for stop loss placement)
     if (activeBroker === "coinbase") {

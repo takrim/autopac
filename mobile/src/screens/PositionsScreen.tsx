@@ -11,10 +11,11 @@ import {
   Animated,
 } from "react-native";
 import { Swipeable } from "react-native-gesture-handler";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Position, fetchPositions, fetchConfig, liquidatePosition, updateStopLoss } from "../services/api";
 
 export default function PositionsScreen() {
+  const navigation = useNavigation<any>();
   const [positions, setPositions] = useState<Position[]>([]);
   const [activeBroker, setActiveBroker] = useState<string>("alpaca");
   const [stopLossPct, setStopLossPct] = useState<number>(0.5);
@@ -139,7 +140,13 @@ export default function PositionsScreen() {
         data={sortedPositions}
         keyExtractor={(item) => item.symbol}
         renderItem={({ item }) => (
-          <PositionCard position={item} onLiquidated={loadPositions} isCoinbase={activeBroker === "coinbase"} stopLossPct={stopLossPct} />
+          <PositionCard
+            position={item}
+            onLiquidated={loadPositions}
+            isCoinbase={activeBroker === "coinbase"}
+            stopLossPct={stopLossPct}
+            onTap={() => navigation.navigate("PositionDetail", { position: item })}
+          />
         )}
         refreshControl={
           <RefreshControl
@@ -174,7 +181,7 @@ export default function PositionsScreen() {
   );
 }
 
-function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5 }: { position: Position; onLiquidated: () => void; isCoinbase?: boolean; stopLossPct?: number }) {
+function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5, onTap }: { position: Position; onLiquidated: () => void; isCoinbase?: boolean; stopLossPct?: number; onTap?: () => void }) {
   const swipeableRef = useRef<Swipeable>(null);
   const [liquidating, setLiquidating] = useState(false);
   const [movingSloss, setMovingSloss] = useState(false);
@@ -351,7 +358,7 @@ function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5 }:
       overshootRight={false}
       onSwipeableOpen={handleLiquidate}
     >
-      <View style={styles.card}>
+      <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={onTap}>
         <View style={styles.cardHeader}>
           <View>
             <Text style={styles.symbol}>{position.symbol}</Text>
@@ -448,7 +455,7 @@ function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5 }:
             )}
           </TouchableOpacity>
         )}
-      </View>
+      </TouchableOpacity>
     </Swipeable>
   );
 }

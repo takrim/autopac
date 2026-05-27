@@ -33,7 +33,7 @@ const DEFAULTS: TradingConfig = {
   TRADE_VALUE_USD: 1000,
   STOP_LOSS_PCT: 0.5,
   TAKE_PROFIT_PCT: 2.0,
-  SIMULATED_FEE_RATE: 0.006,
+  SIMULATED_FEE_RATE: 0.005,
   ALLOWED_DIRECTIONS: "LONG",
   ORDER_PYRAMID: false,
   MAX_DAILY_TRADES: 50,
@@ -98,9 +98,13 @@ export function getBrokerForSymbol(
   const alpacaSymbols = config.brokerSettings?.alpaca?.allowedSymbols || [];
   const coinbaseSymbols = config.brokerSettings?.coinbase?.allowedSymbols || [];
 
+  // Normalize to no-dash uppercase for allowlist comparison (HNTUSD == HNT-USD)
+  const normalize = (s: string) => s.toUpperCase().replace(/-/g, "");
+  const normSym = normalize(symbol);
+
   // Explicit match
-  if (alpacaSymbols.length > 0 && alpacaSymbols.includes(symbol)) return "alpaca";
-  if (coinbaseSymbols.length > 0 && coinbaseSymbols.includes(symbol)) return "coinbase";
+  if (alpacaSymbols.length > 0 && alpacaSymbols.some(s => normalize(s) === normSym)) return "alpaca";
+  if (coinbaseSymbols.length > 0 && coinbaseSymbols.some(s => normalize(s) === normSym)) return "coinbase";
 
   // No explicit match — crypto symbols must be explicitly listed in Coinbase
   if (isCryptoSymbol(symbol)) return null;

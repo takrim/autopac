@@ -324,3 +324,163 @@ export async function handleGetPortfolioHistory(req: Request, res: Response): Pr
     res.status(500).json({ error: "Internal server error" });
   }
 }
+/**
+ * GET /positions/:symbol/levels — compute support/resistance levels from candle data.
+ * Returns pivot lows (support) and pivot highs (resistance) from daily candles.
+ */
+export async function handleGetLevels(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+  const { symbol } = req.params;
+  if (!symbol) { res.status(400).json({ error: "Missing symbol" }); return; }
+
+  try {
+    const tradingConfig = await getTradingConfig();
+    const broker = getBroker(tradingConfig.ACTIVE_BROKER);
+
+    if (broker.name !== "coinbase") {
+      res.status(400).json({ error: "Levels only supported for Coinbase" });
+      return;
+    }
+
+    const cb = broker as import("../brokers/coinbase").CoinbaseBroker;
+    const productId = symbol.includes("-") ? symbol : symbol.replace(/USDT?$/, "") + "-USD";
+
+    // Fetch daily candles for last 90 days
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - 90 * 24 * 3600;
+    const { ok, data } = await (cb as any).request(
+      "GET",
+      `/products/${productId}/candles?start=${start}&end=${now}&granularity=ONE_DAY`
+    );
+
+    if (!ok) {
+      logger.error("[API] Candles fetch failed", { symbol, data });
+      res.status(502).json({ error: "Failed to fetch candle data" });
+      return;
+    }
+
+    const candles = (data.candles as Array<{ start: string; low: string; high: string; open: string; close: string; volume: string }>) || [];
+    if (candles.length < 5) {
+      res.json({ supports: [], resistances: [] });
+      return;
+    }
+
+    // Sort candles by time ascending
+    const sorted = candles
+      .map(c => ({ time: parseInt(c.start), low: parseFloat(c.low), high: parseFloat(c.high), close: parseFloat(c.close) }))
+      .sort((a, b) => a.time - b.time);
+
+    // Find pivot lows (support) and pivot highs (resistance) using 2-bar lookback/lookahead
+    const supports: number[] = [];
+    const resistances: number[] = [];
+
+    for (let i = 2; i < sorted.length - 2; i++) {
+      const curr = sorted[i];
+      // Pivot low: lower than both neighbors
+      if (curr.low < sorted[i-1].low && curr.low < sorted[i-2].low &&
+          curr.low < sorted[i+1].low && curr.low < sorted[i+2].low) {
+        supports.push(curr.low);
+      }
+      // Pivot high: higher than both neighbors
+      if (curr.high > sorted[i-1].high && curr.high > sorted[i-2].high &&
+          curr.high > sorted[i+1].high && curr.high > sorted[i+2].high) {
+        resistances.push(curr.high);
+      }
+    }
+
+    // Also add recent daily low/high as levels
+    const last5 = sorted.slice(-5);
+    const recentLow = Math.min(...last5.map(c => c.low));
+    const recentHigh = Math.max(...last5.map(c => c.high));
+
+    // Deduplicate (cluster levels within 1.5% of each other)
+    const cluster = (levels: number[]): number[] => {
+      const sorted = [...levels].sort((a, b) => a - b);
+      const result: number[] = [];
+      for (const level of sorted) {
+        if (result.length === 0 || Math.abs(level - result[result.length - 1]) / result[result.length - 1] > 0.015) {
+          result.push(level);
+        }
+      }
+      return result;
+    };
+
+    const currentPrice = sorted[sorted.length - 1].close;
+
+    res.json({
+      supports: cluster([...supports, recentLow]).filter(l => l < currentPrice).sort((a, b) => b - a).slice(0, 8),
+      resistances: cluster([...resistances, recentHigh]).filter(l => l > currentPrice).sort((a, b) => a - b).slice(0, 8),
+      currentPrice,
+    });
+  } catch (err) {
+    logger.error("[API] Levels request error", { symbol, error: String(err) });
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+/**
+ * GET /positions/:symbol/news — fetch recent news for a crypto symbol.
+ * Uses Google News RSS feed (no API key needed).
+ */
+export async function handleGetNews(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+  const { symbol } = req.params;
+  if (!symbol) { res.status(400).json({ error: "Missing symbol" }); return; }
+
+  try {
+    // Extract base symbol and build search query
+    const base = symbol.replace(/-USD$/, "").replace(/USDT?$/, "");
+    // Map common tickers to full names for better results
+    const nameMap: Record<string, string> = {
+      BTC: "Bitcoin", ETH: "Ethereum", SOL: "Solana", ADA: "Cardano",
+      DOT: "Polkadot", XRP: "Ripple", DOGE: "Dogecoin", AVAX: "Avalanche",
+      LINK: "Chainlink", MATIC: "Polygon", SUI: "Sui", NEAR: "NEAR Protocol",
+      ARB: "Arbitrum", OP: "Optimism", APT: "Aptos", ICP: "Internet Computer",
+    };
+    const name = nameMap[base] || base;
+    const query = encodeURIComponent(`${name} crypto`);
+
+    const resp = await fetch(
+      `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`,
+      { headers: { Accept: "application/xml" } }
+    );
+
+    if (!resp.ok) {
+      res.json({ news: [] });
+      return;
+    }
+
+    const xml = await resp.text();
+    // Parse RSS XML manually (no external deps)
+    const articles: Array<{ id: string; title: string; url: string; summary: string; source: string; imageUrl: string; publishedAt: number }> = [];
+    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+    let match;
+    let idx = 0;
+    while ((match = itemRegex.exec(xml)) !== null && idx < 10) {
+      const item = match[1];
+      const title = item.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1") || "";
+      const link = item.match(/<link>([\s\S]*?)<\/link>/)?.[1]?.trim() || "";
+      const pubDate = item.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1] || "";
+      const source = item.match(/<source[^>]*>([\s\S]*?)<\/source>/)?.[1]?.replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1") || "";
+      articles.push({
+        id: String(idx),
+        title: title.trim(),
+        url: link.trim(),
+        summary: "",
+        source: source.trim(),
+        imageUrl: "",
+        publishedAt: pubDate ? new Date(pubDate).getTime() : Date.now(),
+      });
+      idx++;
+    }
+
+    res.json({ news: articles });
+  } catch (err) {
+    logger.error("[API] News request error", { symbol, error: String(err) });
+    res.json({ news: [] });
+  }
+}

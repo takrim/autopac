@@ -133,3 +133,124 @@ export async function sendSignalNotification(signal: Signal): Promise<void> {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Generic push helper + dedicated senders for the Coinbase auto-trading flow
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a custom push notification to every registered Expo token.
+ * Used by burstScanner (buy executed) and positionLiquidator (winning exits).
+ */
+async function sendPushToAllTokens(
+  title: string,
+  body: string,
+  data: Record<string, string>,
+  auditTag: string
+): Promise<void> {
+  try {
+    const tokensSnap = await db.collection("userTokens").get();
+    if (tokensSnap.empty) {
+      logger.warn("[NOTIFY] No push tokens registered — skipping", { auditTag });
+      return;
+    }
+
+    const tokens: string[] = [];
+    tokensSnap.forEach((doc) => {
+      const t = doc.data().token;
+      if (t) tokens.push(t);
+    });
+    if (tokens.length === 0) return;
+
+    const messages = tokens.map((token) => ({
+      to: token,
+      sound: "default" as const,
+      title,
+      body,
+      data,
+    }));
+
+    const response = await fetch(EXPO_PUSH_URL, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Accept-encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(messages),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Expo Push API error: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json() as { data: ExpoPushTicket[] };
+    const tickets = result.data;
+
+    let successCount = 0;
+    let failureCount = 0;
+    const invalidTokens: string[] = [];
+
+    tickets.forEach((ticket, idx) => {
+      if (ticket.status === "ok") successCount++;
+      else {
+        failureCount++;
+        if (ticket.details?.error === "DeviceNotRegistered") invalidTokens.push(tokens[idx]);
+      }
+    });
+
+    if (invalidTokens.length > 0) {
+      const batch = db.batch();
+      const toDelete = await db.collection("userTokens").where("token", "in", invalidTokens).get();
+      toDelete.forEach((doc) => batch.delete(doc.ref));
+      await batch.commit();
+      logger.info(`[NOTIFY] Cleaned up ${invalidTokens.length} invalid tokens`);
+    }
+
+    logger.info(`[NOTIFY] ${auditTag} — sent to ${successCount}/${tokens.length} devices (failed: ${failureCount})`);
+    await logAudit("NOTIFICATION_SENT", { details: { auditTag, successCount, failureCount, title, body } });
+  } catch (err) {
+    logger.error("[NOTIFY] Push failed", { auditTag, error: String(err) });
+    await logAudit("NOTIFICATION_FAILED", { details: { auditTag, error: String(err) } });
+  }
+}
+
+/**
+ * Push fired by burstScanner when an auto-buy succeeds on Coinbase.
+ * Example body: "Burst BUY: BTC-USD @ $43,210.55"
+ */
+export async function sendBurstBuyNotification(
+  symbol: string,
+  price: number,
+  signalId: string
+): Promise<void> {
+  const priceStr = price >= 1
+    ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    : `$${price.toPrecision(4)}`;
+  await sendPushToAllTokens(
+    "💥 Burst BUY",
+    `Burst BUY: ${symbol} @ ${priceStr}`,
+    { type: "BURST_BUY", signalId, symbol, price: String(price) },
+    "BURST_BUY"
+  );
+}
+
+/**
+ * Push fired by positionLiquidator when a position exits with positive P/L.
+ * `reason` is a short human label: "RSI cut", "trailing stop", "external close".
+ */
+export async function sendExitNotification(
+  symbol: string,
+  pnlPct: number,
+  reason: string,
+  signalId: string = ""
+): Promise<void> {
+  const sign = pnlPct >= 0 ? "+" : "";
+  await sendPushToAllTokens(
+    "💰 Position Closed",
+    `SOLD: ${symbol} ${sign}${pnlPct.toFixed(2)}% (${reason})`,
+    { type: "POSITION_EXIT", signalId, symbol, pnlPct: pnlPct.toFixed(2), reason },
+    "EXIT_WIN"
+  );
+}

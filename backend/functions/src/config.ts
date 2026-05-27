@@ -44,9 +44,23 @@ export const CONFIG = {
   PAPER_TRADING: process.env.PAPER_TRADING !== "false",
 
   // Simulated fee rate per side (entry + exit) to approximate real exchange costs.
-  // Default matches Coinbase Advanced taker fee for < $10K/month volume (0.6%).
-  // Set SIMULATED_FEE_RATE=0 to disable, or 0.004 for Coinbase maker fee.
-  SIMULATED_FEE_RATE: parseFloat(process.env.SIMULATED_FEE_RATE || "0.006"),
+  // Default matches Coinbase Advanced taker fee on the current tier (0.5%).
+  // Set SIMULATED_FEE_RATE=0 to disable, or 0.0025 for the maker fee on this tier.
+  SIMULATED_FEE_RATE: parseFloat(process.env.SIMULATED_FEE_RATE || "0.005"),
+
+  // Backtest job (BTC-USD, 5-minute candles)
+  BACKTEST_LOOKBACK_DAYS: parseInt(process.env.BACKTEST_LOOKBACK_DAYS || "90", 10),
+  BACKTEST_GRANULARITY_SECONDS: parseInt(process.env.BACKTEST_GRANULARITY_SECONDS || "300", 10),
+  BACKTEST_CHUNK_CANDLES: parseInt(process.env.BACKTEST_CHUNK_CANDLES || "300", 10),
+  BACKTEST_REQUEST_DELAY_MS: parseInt(process.env.BACKTEST_REQUEST_DELAY_MS || "120", 10),
+  BACKTEST_TRADE_VALUE_USD: parseFloat(process.env.BACKTEST_TRADE_VALUE_USD || "1000"),
+  BACKTEST_STOP_LOSS_PCT: parseFloat(process.env.BACKTEST_STOP_LOSS_PCT || "1.0"),
+  BACKTEST_TAKE_PROFIT_PCT: parseFloat(process.env.BACKTEST_TAKE_PROFIT_PCT || "3.0"),
+  BACKTEST_SLIPPAGE_BPS: parseFloat(process.env.BACKTEST_SLIPPAGE_BPS || "8"),
+  BACKTEST_FEE_RATE_PER_SIDE: parseFloat(process.env.BACKTEST_FEE_RATE_PER_SIDE || "0.005"),
+  BACKTEST_REPORT_MAX_TRADES: parseInt(process.env.BACKTEST_REPORT_MAX_TRADES || "200", 10),
+  BACKTEST_MAX_HOLD_CANDLES: parseInt(process.env.BACKTEST_MAX_HOLD_CANDLES || "36", 10),   // 3h max
+  BACKTEST_COOLDOWN_CANDLES: parseInt(process.env.BACKTEST_COOLDOWN_CANDLES || "5", 10),    // 25min cooldown
 } as const;
 
 /**
@@ -81,5 +95,17 @@ export function getCoinbaseConfig() {
   return {
     apiKey: process.env.COINBASE_API_KEY || "",
     apiSecret: (process.env.COINBASE_API_SECRET || "").replace(/\\n/g, "\n"),
+  };
+}
+
+/**
+ * Get Telegram bot config from env/secrets.
+ */
+export function getTelegramConfig() {
+  return {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+    chatId: process.env.TELEGRAM_CHAT_ID || "",
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || "",
+    enabled: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
   };
 }

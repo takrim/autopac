@@ -12,6 +12,7 @@ import PositionsScreen from "../screens/PositionsScreen";
 import OrdersScreen from "../screens/OrdersScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 import TrendingScreen from "../screens/TrendingScreen";
+import PositionDetailScreen from "../screens/PositionDetailScreen";
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -34,6 +35,23 @@ function SignalsStack() {
         name="SignalDetail"
         component={SignalDetailScreen}
         options={{ title: "Signal Detail" }}
+      />
+    </Stack.Navigator>
+  );
+}
+
+function PositionsStack() {
+  return (
+    <Stack.Navigator screenOptions={screenOptions}>
+      <Stack.Screen
+        name="PositionsList"
+        component={PositionsScreen}
+        options={{ title: "Positions" }}
+      />
+      <Stack.Screen
+        name="PositionDetail"
+        component={PositionDetailScreen}
+        options={{ title: "Position Detail" }}
       />
     </Stack.Navigator>
   );
@@ -79,11 +97,10 @@ function MainTabs() {
       />
       <Tab.Screen
         name="PositionsTab"
-        component={PositionsScreen}
+        component={PositionsStack}
         options={{
           title: "Positions",
-          ...screenOptions,
-          headerShown: true,
+          headerShown: false,
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>💰</Text>,
         }}
       />
@@ -121,7 +138,14 @@ export default function AppNavigator() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       {user ? (
-        <Stack.Screen name="Main" component={MainTabs} />
+        <>
+          <Stack.Screen name="Main" component={MainTabs} />
+          <Stack.Screen
+            name="PositionDetailModal"
+            component={PositionDetailScreen}
+            options={{ headerShown: true, ...screenOptions, title: "Position Detail" }}
+          />
+        </>
       ) : (
         <Stack.Screen name="Login" component={LoginScreen} />
       )}

@@ -93,6 +93,24 @@ export async function rejectSignal(signalId: string): Promise<TradeResult> {
   });
 }
 
+export interface ManualOrderResult {
+  status: string;
+  signalId: string;
+  orderId?: string;
+  symbol: string;
+  side: string;
+  price: number;
+  stopLoss: number;
+  takeProfit: number;
+}
+
+export async function placeManualOrder(symbol: string, action: "BUY" | "SELL" = "BUY", price?: number): Promise<ManualOrderResult> {
+  return apiRequest<ManualOrderResult>("/orders/manual", {
+    method: "POST",
+    body: JSON.stringify({ symbol, action, ...(price ? { price } : {}) }),
+  });
+}
+
 // --- Orders ---
 
 export interface Order {
@@ -200,6 +218,35 @@ export async function updateStopLoss(symbol: string, stopPrice: number): Promise
   });
 }
 
+// --- Support/Resistance Levels ---
+
+export interface LevelsResponse {
+  supports: number[];
+  resistances: number[];
+  currentPrice: number;
+}
+
+export async function fetchLevels(symbol: string): Promise<LevelsResponse> {
+  return apiRequest<LevelsResponse>(`/positions/${encodeURIComponent(symbol)}/levels`);
+}
+
+// --- News ---
+
+export interface NewsArticle {
+  id: string;
+  title: string;
+  url: string;
+  summary: string;
+  source: string;
+  imageUrl: string;
+  publishedAt: number;
+}
+
+export async function fetchNews(symbol: string): Promise<NewsArticle[]> {
+  const data = await apiRequest<{ news: NewsArticle[] }>(`/positions/${encodeURIComponent(symbol)}/news`);
+  return data.news;
+}
+
 // --- Portfolio History ---
 
 export interface PortfolioHistory {
@@ -275,7 +322,13 @@ export interface Decision {
   reasons: string[];
   rsi?: number | null;
   price?: number | null;
+  broker?: string | null;
   signalId?: string | null;
+  bookScore?: number | null;
+  bookSignal?: string | null;
+  bookReasons?: string[] | null;
+  volumeSpike?: boolean | null;
+  volumeRatio?: number | null;
   meta?: Record<string, unknown>;
   createdAt: any;
 }
@@ -324,4 +377,29 @@ export async function fetchTrending(params?: {
   const qs = query.toString();
   const data = await apiRequest<{ trending: TrendingCrypto[] }>(`/trending${qs ? `?${qs}` : ""}`);
   return data.trending;
+}
+
+// --- Book Analysis ---
+
+export interface BookAnalysis {
+  symbol: string;
+  midPrice: number;
+  spread: number;         // spread %
+  score: number;          // -4 to +4
+  signal: "buy" | "neutral" | "sell";
+  recommendation: string; // "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell"
+  imbalanceRatio: number;
+  bidPct: number;
+  askPct: number;
+  totalBidUsd: number;
+  totalAskUsd: number;
+  depth1pctBidUsd: number;
+  depth1pctAskUsd: number;
+  topBidWall: { price: number; sizeUsd: number } | null;
+  topAskWall: { price: number; sizeUsd: number } | null;
+  reasons: string[];
+}
+
+export async function fetchBookAnalysis(symbol: string): Promise<BookAnalysis> {
+  return apiRequest<BookAnalysis>(`/book/${encodeURIComponent(symbol)}`);
 }

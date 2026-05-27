@@ -10,6 +10,7 @@ import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
 import { getBroker } from "../brokers";
+import { fetchOrderBook, scoreBook, normalizeBookSymbol } from "../services/orderbook";
 
 const db = getFirestore();
 
@@ -95,6 +96,14 @@ async function logDecision(data: {
   price?: number | null;
   signalId?: string | null;
   orderId?: string | null;
+  // ── Book analysis ───────────────────────────────────────────────────
+  bookScore?: number | null;
+  bookSignal?: string | null;
+  bookReasons?: string[] | null;
+  // ── Volume spike ────────────────────────────────────────────────────
+  volumeSpike?: boolean | null;
+  volumeRatio?: number | null;
+  // ── Extra context ────────────────────────────────────────────────────
   meta?: Record<string, unknown>;
 }): Promise<void> {
   try {
@@ -492,12 +501,14 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     willNotify: isStrongBuy,
   });
   if (isStrongBuy) {
-    try {
-      await sendSignalNotification({ ...signal, ...freshData, id: docRef.id } as Signal);
-      logger.info("[WEBHOOK] Notification sent for Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
-    } catch (err) {
-      logger.error("[WEBHOOK] Notification error (non-fatal)", { signalId: docRef.id, error: String(err) });
-    }
+    // DISABLED — push notifications now come from burstScanner / positionLiquidator (Coinbase auto-trading flow)
+    // try {
+    //   await sendSignalNotification({ ...signal, ...freshData, id: docRef.id } as Signal);
+    //   logger.info("[WEBHOOK] Notification sent for Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
+    // } catch (err) {
+    //   logger.error("[WEBHOOK] Notification error (non-fatal)", { signalId: docRef.id, error: String(err) });
+    // }
+    logger.info("[WEBHOOK] Strong Buy push suppressed (legacy flow disabled)", { signalId: docRef.id, symbol: payload.symbol });
   }
 
   logger.info("[WEBHOOK] Signal created", { signalId: docRef.id, symbol: payload.symbol });
@@ -513,8 +524,22 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     rsi: freshData?.rsi ?? null,
     price: payload.price,
     signalId: docRef.id,
+    volumeSpike: null,
+    volumeRatio: null,
+    bookScore: null,
+    bookSignal: null,
+    bookReasons: null,
     meta: { strongBuy: isStrongBuy, idempotencyKey },
   });
+
+  // Strong Buys are executed by the burst scanner (VIP pathway), NOT here.
+  // Leave the signal as PENDING; burst scanner picks it up next cycle (≤5 min),
+  // applies forbidden-category / held / cooldown / position-cap guards, then buys.
+  if (isStrongBuy) {
+    logger.info("[WEBHOOK] Strong Buy queued for burst scanner pickup", { signalId: docRef.id, symbol: payload.symbol });
+    res.status(201).json({ status: "queued_for_burst_scanner", signalId: docRef.id });
+    return;
+  }
 
   // Auto-approve: skip manual approval and execute immediately
   if (tradingConfig.AUTO_APPROVE) {
@@ -594,6 +619,8 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
         reasons: ["Symbol not in any broker allowlist"],
         broker: tradingConfigForFilter.ACTIVE_BROKER,
         price: !isNaN(price) ? price : null,
+        bookScore: null, bookSignal: null, bookReasons: null,
+        volumeSpike: null, volumeRatio: null,
       });
       res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
       return;
@@ -615,6 +642,29 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
     });
 
     logger.info("[BULLTREND] Stored", { id: bulltrendDoc.id, symbol, bullishTrend });
+
+    // ── Fetch order book once — attached to every logDecision for debugging ──
+    let globalBookScore = 0;
+    let globalBookSignal: string = "unavailable";
+    let globalBookReasons: string[] = [];
+    try {
+      const bookSymbol = normalizeBookSymbol(symbol);
+      const book = await fetchOrderBook(bookSymbol, 50);
+      if (book && book.bids.length > 0 && book.asks.length > 0) {
+        const scored = scoreBook(book.bids, book.asks);
+        globalBookScore = scored.score;
+        globalBookSignal = scored.signal;
+        globalBookReasons = scored.reasons;
+        logger.info("[BULLTREND] Book snapshot", { symbol, bookSymbol, globalBookScore, globalBookSignal });
+      } else {
+        globalBookReasons.push("Order book unavailable");
+        logger.warn("[BULLTREND] Order book fetch failed", { symbol });
+      }
+    } catch (bookErr) {
+      globalBookReasons.push(`Order book error: ${String(bookErr)}`);
+      logger.error("[BULLTREND] Order book check failed", { symbol, error: String(bookErr) });
+    }
+    const bookMeta = { bookScore: globalBookScore, bookSignal: globalBookSignal, bookReasons: globalBookReasons };
 
     // Check if a PENDING buy signal exists for this symbol within the 6–9 min window
     let matchedSignalId: string | null = null;
@@ -638,27 +688,59 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
         const signalCreated = signalDoc.data().createdAt?.toDate?.() as Date | undefined;
         const ageMinutes = signalCreated ? (Date.now() - signalCreated.getTime()) / 60000 : 0;
 
-        await signalDoc.ref.update({
-          strongBuy: true,
-          bullishTrend: true,
-          bulltrendPrice: !isNaN(price) ? price : null,
-          bulltrendVolume: !isNaN(volume) ? volume : null,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-        matchedSignalId = signalDoc.id;
-        logger.info("[BULLTREND] Matched PENDING signal → Strong Buy", { signalId: signalDoc.id, symbol, ageMinutes: ageMinutes.toFixed(1) });
+        // ── Order book gate for strategy-mode correlation (use cached snapshot) ──
+        const stratBookScore = globalBookScore;
+        const stratBookSignal = globalBookSignal;
+        const stratBookReasons = globalBookReasons;
 
-        // Send push notification now that it's a Strong Buy
-        try {
-          const updatedSnap = await signalDoc.ref.get();
-          const updatedSignal = { id: signalDoc.id, ...updatedSnap.data() } as Signal;
-          await sendSignalNotification(updatedSignal);
-          logger.info("[BULLTREND] Notification sent for Strong Buy", { signalId: signalDoc.id, symbol });
-        } catch (notifErr) {
-          logger.error("[BULLTREND] Notification error (non-fatal)", { signalId: signalDoc.id, error: String(notifErr) });
-        }
-      }
-    }
+        if (stratBookSignal !== "buy") {
+          logger.info("[BULLTREND] Strategy match rejected by order book", { symbol, stratBookScore, stratBookSignal });
+          await logDecision({
+            handler: "bulltrend",
+            symbol,
+            payload: { bullish_trend: bullishTrend, price, volume, time },
+            decision: "rejected",
+            reasons: [
+              "Strategy signal found but order book does not confirm buy",
+              `Book score: ${stratBookScore > 0 ? "+" : ""}${stratBookScore}/4 (${stratBookSignal})`,
+              ...stratBookReasons,
+            ],
+            broker: bulltrendBroker,
+            price: !isNaN(price) ? price : null,
+            bookScore: globalBookScore,
+            bookSignal: globalBookSignal,
+            bookReasons: globalBookReasons,
+            volumeSpike: null,
+            volumeRatio: null,
+            meta: { signalId: signalDoc.id, ageMinutes: ageMinutes.toFixed(1) },
+          });
+          // Don't promote to Strong Buy, leave signal as PENDING
+        } else {
+          await signalDoc.ref.update({
+            strongBuy: true,
+            bullishTrend: true,
+            bulltrendPrice: !isNaN(price) ? price : null,
+            bulltrendVolume: !isNaN(volume) ? volume : null,
+            bookScore: globalBookScore,
+            bookSignal: globalBookSignal,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          matchedSignalId = signalDoc.id;
+          logger.info("[BULLTREND] Matched PENDING signal → Strong Buy (book confirmed)", { signalId: signalDoc.id, symbol, ageMinutes: ageMinutes.toFixed(1), stratBookScore });
+
+          // DISABLED — push notifications now come from burstScanner / positionLiquidator (Coinbase auto-trading flow)
+          // try {
+          //   const updatedSnap = await signalDoc.ref.get();
+          //   const updatedSignal = { id: signalDoc.id, ...updatedSnap.data() } as Signal;
+          //   await sendSignalNotification(updatedSignal);
+          //   logger.info("[BULLTREND] Notification sent for Strong Buy", { signalId: signalDoc.id, symbol });
+          // } catch (notifErr) {
+          //   logger.error("[BULLTREND] Notification error (non-fatal)", { signalId: signalDoc.id, error: String(notifErr) });
+          // }
+          logger.info("[BULLTREND] Strong Buy push suppressed (legacy flow disabled)", { signalId: signalDoc.id, symbol });
+        } // end book confirmed else
+      } // end if (!pendingSnap.empty)
+    } // end if (bullishTrend) — strategy match
 
     // --- RSI Mode: Auto-buy on bull trend ---
     let rsiOrderResult: Record<string, unknown> | null = null;
@@ -671,6 +753,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
         reasons: ["bullish_trend is false — no buy evaluation"],
         broker: bulltrendBroker,
         price: !isNaN(price) ? price : null,
+        bookScore: globalBookScore,
+        bookSignal: globalBookSignal,
+        bookReasons: globalBookReasons,
+        volumeSpike: null,
+        volumeRatio: null,
         meta: { bulltrendId: bulltrendDoc.id },
       });
     } else {
@@ -686,6 +773,8 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           // RSI override skips the RSI part but support is always calculated
           let buyRsi: number | undefined;
           let buySupport: number | undefined;
+          let buyVolumeSpike: boolean | null = null;
+          let buyVolumeRatio: number | null = null;
           try {
             const indicators = await calculateIndicators(symbol, entryPrice, bulltrendBroker);
             if (!isNaN(rsiOverride)) {
@@ -697,7 +786,9 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             if (indicators.support !== null) {
               buySupport = indicators.support;
             }
-            logger.info("[BULLTREND] Indicators", { symbol, rsi: buyRsi ?? "unavailable", support: buySupport ?? "none", rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null });
+            buyVolumeSpike = indicators.volumeSpike;
+            buyVolumeRatio = indicators.volumeRatio;
+            logger.info("[BULLTREND] Indicators", { symbol, rsi: buyRsi ?? "unavailable", support: buySupport ?? "none", volumeSpike: buyVolumeSpike, volumeRatio: buyVolumeRatio, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null });
           } catch (indErr) {
             if (!isNaN(rsiOverride)) {
               buyRsi = parseFloat(rsiOverride.toFixed(4));
@@ -735,10 +826,71 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
               broker: bulltrendBroker,
               rsi: buyRsi ?? null,
               price: !isNaN(price) ? price : null,
+              bookScore: globalBookScore,
+              bookSignal: globalBookSignal,
+              bookReasons: globalBookReasons,
+              volumeSpike: buyVolumeSpike,
+              volumeRatio: buyVolumeRatio,
               meta: { rsiInBuyZone, rsiTooHigh, rsiUnavailable, bulltrendId: bulltrendDoc.id, matchedSignalId, recentStopFills },
             });
             // Still store the bulltrend but skip order creation
           } else {
+
+          // ── Order book gate: use cached snapshot ──────────────────────────
+          if (globalBookSignal !== "buy") {
+            logger.info("[BULLTREND] Skipping auto-buy — order book does not confirm buy", { symbol, bookScore: globalBookScore, bookSignal: globalBookSignal });
+            const recentStopFills = await getRecentStopFills(symbol);
+            await logDecision({
+              handler: "bulltrend",
+              symbol,
+              payload: { bullish_trend: bullishTrend, price, volume, time },
+              decision: "rejected",
+              reasons: [
+                ...buyReasons,
+                `Order book rejected: score ${globalBookScore > 0 ? "+" : ""}${globalBookScore}/4 (${globalBookSignal})`,
+                ...globalBookReasons,
+              ],
+              broker: bulltrendBroker,
+              rsi: buyRsi ?? null,
+              price: !isNaN(price) ? price : null,
+              bookScore: globalBookScore,
+              bookSignal: globalBookSignal,
+              bookReasons: globalBookReasons,
+              volumeSpike: buyVolumeSpike,
+              volumeRatio: buyVolumeRatio,
+              meta: { rsiInBuyZone, bulltrendId: bulltrendDoc.id, matchedSignalId, recentStopFills },
+            });
+            res.json({ status: "stored", id: bulltrendDoc.id, symbol, bullish_trend: bullishTrend, matchedSignalId, rsiOrder: null, bookRejected: true, bookScore: globalBookScore, bookSignal: globalBookSignal });
+            return;
+          }
+
+          // ── Volume spike gate: reject if last candle volume < 1.5× 20-bar avg ────────
+          if (buyVolumeSpike === false) {
+            // volumeSpike is explicitly false (not null = unavailable)
+            logger.info("[BULLTREND] Skipping auto-buy — no volume spike", { symbol, volumeRatio: buyVolumeRatio });
+            const recentStopFills = await getRecentStopFills(symbol);
+            await logDecision({
+              handler: "bulltrend",
+              symbol,
+              payload: { bullish_trend: bullishTrend, price, volume, time },
+              decision: "rejected",
+              reasons: [
+                ...buyReasons,
+                `Volume too low: ratio ${buyVolumeRatio}x (need ≥1.5× avg) — breakout not confirmed`,
+              ],
+              broker: bulltrendBroker,
+              rsi: buyRsi ?? null,
+              price: !isNaN(price) ? price : null,
+              bookScore: globalBookScore,
+              bookSignal: globalBookSignal,
+              bookReasons: globalBookReasons,
+              volumeSpike: buyVolumeSpike,
+              volumeRatio: buyVolumeRatio,
+              meta: { rsiInBuyZone, bulltrendId: bulltrendDoc.id, matchedSignalId, recentStopFills },
+            });
+            res.json({ status: "stored", id: bulltrendDoc.id, symbol, bullish_trend: bullishTrend, matchedSignalId, rsiOrder: null, volumeRejected: true, volumeRatio: buyVolumeRatio });
+            return;
+          }
 
           // Pyramid check: block duplicate buy if position already exists
           if (!tradingConfig.ORDER_PYRAMID) {
@@ -756,6 +908,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
                   broker: bulltrendBroker,
                   rsi: buyRsi ?? null,
                   price: !isNaN(price) ? price : null,
+                  bookScore: globalBookScore,
+                  bookSignal: globalBookSignal,
+                  bookReasons: globalBookReasons,
+                  volumeSpike: buyVolumeSpike,
+                  volumeRatio: buyVolumeRatio,
                   meta: { existingQty: existingPos.qty, bulltrendId: bulltrendDoc.id },
                 });
                 res.json({ status: "stored", id: bulltrendDoc.id, symbol, bullish_trend: bullishTrend, matchedSignalId, rsiOrder: null, pyramidBlocked: true });
@@ -791,13 +948,14 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
           rsiSignal.id = rsiDocRef.id;
           logger.info("[BULLTREND] RSI auto-buy signal created", { signalId: rsiDocRef.id, symbol, price: entryPrice, rsi: buyRsi ?? "unavailable" });
 
-          // Send notification
-          try {
-            await sendSignalNotification({ ...rsiSignal, id: rsiDocRef.id } as Signal);
-            logger.info("[BULLTREND] RSI auto-buy notification sent", { signalId: rsiDocRef.id, symbol });
-          } catch (notifErr) {
-            logger.error("[BULLTREND] RSI notification error (non-fatal)", { signalId: rsiDocRef.id, error: String(notifErr) });
-          }
+          // DISABLED — push notifications now come from burstScanner / positionLiquidator (Coinbase auto-trading flow)
+          // try {
+          //   await sendSignalNotification({ ...rsiSignal, id: rsiDocRef.id } as Signal);
+          //   logger.info("[BULLTREND] RSI auto-buy notification sent", { signalId: rsiDocRef.id, symbol });
+          // } catch (notifErr) {
+          //   logger.error("[BULLTREND] RSI notification error (non-fatal)", { signalId: rsiDocRef.id, error: String(notifErr) });
+          // }
+          logger.info("[BULLTREND] RSI auto-buy push suppressed (legacy flow disabled)", { signalId: rsiDocRef.id, symbol });
 
           // Log buy decision
           await logDecision({
@@ -810,6 +968,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             rsi: buyRsi ?? null,
             price: entryPrice,
             signalId: rsiDocRef.id,
+            bookScore: globalBookScore,
+            bookSignal: globalBookSignal,
+            bookReasons: globalBookReasons,
+            volumeSpike: buyVolumeSpike,
+            volumeRatio: buyVolumeRatio,
             meta: { rsiInBuyZone, rsiTooHigh, bulltrendId: bulltrendDoc.id, matchedSignalId, support: buySupport ?? null },
           });
 
@@ -832,6 +995,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
             reasons: [`ORDER_MODE is ${mode} — RSI auto-buy not active`],
             broker: bulltrendBroker,
             price: !isNaN(price) ? price : null,
+            bookScore: globalBookScore,
+            bookSignal: globalBookSignal,
+            bookReasons: globalBookReasons,
+            volumeSpike: null,
+            volumeRatio: null,
             meta: { mode, bulltrendId: bulltrendDoc.id, matchedSignalId },
           });
         }
@@ -914,6 +1082,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
         reasons: ["Symbol not in any broker allowlist"],
         broker: configForFilter.ACTIVE_BROKER,
         price: !isNaN(price) ? price : null,
+        bookScore: null, bookSignal: null, bookReasons: null,
+        volumeSpike: null, volumeRatio: null,
       });
       res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
       return;
@@ -1049,6 +1219,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
             broker: beartrendBroker,
             rsi: currentRsi,
             price: !isNaN(price) ? price : null,
+            bookScore: null, bookSignal: null, bookReasons: null,
+            volumeSpike: null, volumeRatio: null,
             meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id, recentStopFills, stopPlaced, stopResult, pnlForStop },
           });
         } else {
@@ -1090,6 +1262,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
                     broker: beartrendBroker,
                     rsi: currentRsi,
                     price: !isNaN(price) ? price : null,
+                    bookScore: null, bookSignal: null, bookReasons: null,
+                    volumeSpike: null, volumeRatio: null,
                     meta: { currentRsi, buyRsi, rsiInOverboughtZone, pnl, stopPrice, stopPlaced, stopResult, beartrendId: beartrendDoc.id, recentStopFills },
                   });
                   // Skip liquidation — stop is placed
@@ -1111,6 +1285,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
                     broker: beartrendBroker,
                     rsi: currentRsi,
                     price: !isNaN(price) ? price : null,
+                    bookScore: null, bookSignal: null, bookReasons: null,
+                    volumeSpike: null, volumeRatio: null,
                     meta: { currentRsi, buyRsi, pnl: pos.unrealized_pl, fees: pos.actual_fees, costBasis: pos.cost_basis, marketValue: pos.market_value, beartrendId: beartrendDoc.id, recentStopFills },
                   });
                   res.json({ status: "rejected_negative_pnl", symbol, pnl: pos.unrealized_pl });
@@ -1131,6 +1307,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
               broker: beartrendBroker,
               rsi: currentRsi,
               price: !isNaN(price) ? price : null,
+              bookScore: null, bookSignal: null, bookReasons: null,
+              volumeSpike: null, volumeRatio: null,
               meta: { currentRsi, buyRsi, rsiDroppedBelowBuy, rsiInOverboughtZone, rsiUnavailable, beartrendId: beartrendDoc.id, liquidationResult },
             });
 
@@ -1143,8 +1321,10 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
                 price: !isNaN(price) ? price : 0,
                 strongBuy: false,
               } as Signal;
-              await sendSignalNotification(liquidSignal);
-              logger.info("[BEARTREND] Liquidation notification sent", { symbol });
+              // DISABLED — push notifications now come from burstScanner / positionLiquidator (Coinbase auto-trading flow)
+              // await sendSignalNotification(liquidSignal);
+              void liquidSignal;
+              logger.info("[BEARTREND] Liquidation push suppressed (legacy flow disabled)", { symbol });
             } catch (notifErr) {
               logger.error("[BEARTREND] Notification error (non-fatal)", { symbol, error: String(notifErr) });
             }
@@ -1162,6 +1342,8 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
                 broker: beartrendBroker,
                 rsi: currentRsi,
                 price: !isNaN(price) ? price : null,
+                bookScore: null, bookSignal: null, bookReasons: null,
+                volumeSpike: null, volumeRatio: null,
                 meta: { currentRsi, buyRsi, beartrendId: beartrendDoc.id },
               });
             } else {

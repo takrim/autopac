@@ -106,6 +106,12 @@ export interface PlaceOrderParams {
   stopLoss?: number;
   takeProfit?: number;
   tradeValueUsd?: number;
+  /**
+   * When true, the broker attempts a post-only (maker) limit fill first and
+   * falls back to a market (taker) order if it doesn't fill within the broker's
+   * internal timeout. Currently honoured by Coinbase BUYs only.
+   */
+  makerFirst?: boolean;
 }
 
 export interface PlaceOrderResult {
@@ -131,7 +137,8 @@ export type AuditAction =
   | "ORDER_FILLED"
   | "ORDER_FAILED"
   | "RISK_CHECK_PASSED"
-  | "RISK_CHECK_FAILED";
+  | "RISK_CHECK_FAILED"
+  | "MANUAL_ORDER";
 
 export interface AuditEntry {
   action: AuditAction;
@@ -146,4 +153,89 @@ export interface AuditEntry {
 export interface TradeApprovalRequest {
   signalId: string;
   action: DecisionAction;
+}
+
+// --- Backtest ---
+
+export type BacktestGrade = "A+" | "B" | "WEAK";
+
+export interface BacktestCandle {
+  ts: number; // unix seconds
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface BacktestIndicatorPoint {
+  ts: number;
+  close: number;
+  rsi14: number | null;
+  vwap20: number | null;
+  rvol20: number | null;
+  bbMid20: number | null;
+  bbUpper20: number | null;
+  bbLower20: number | null;
+  ema50: number | null;
+  grade: BacktestGrade;
+  // ScalpX indicators
+  almaClose?: number | null;
+  almaOpen?: number | null;
+  ema144?: number | null;
+  rsi28?: number | null;
+}
+
+export interface BacktestTrade {
+  symbol: string;
+  grade: BacktestGrade;
+  entryTs: number;
+  exitTs: number;
+  entryPrice: number;
+  exitPrice: number;
+  qty: number;
+  grossPnl: number;
+  netPnl: number;
+  fees: number;
+  slippageCost: number;
+  exitReason: "stop" | "target" | "time";
+}
+
+export interface BacktestRunSummary {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netPnl: number;
+  grossPnl: number;
+  totalFees: number;
+  totalSlippage: number;
+  maxDrawdown: number;
+  stopCount: number;
+  targetCount: number;
+  timeCount: number;
+  avgHoldHours: number;
+  totalVolumeUsd: number;
+  totalVolumeBtc: number;
+  orderSizeUsd: number;
+  avgWin: number;
+  avgLoss: number;
+  bestHourUtc: number;
+  bestGrade: BacktestGrade;
+}
+
+export interface BacktestRunDoc {
+  symbol: string;
+  granularity: "FIVE_MINUTE";
+  lookbackDays: number;
+  engineVersion: string;
+  strategyId?: string;
+  trigger: "scheduled" | "manual";
+  runStartedAtMs: number;
+  runCompletedAtMs: number;
+  durationMs: number;
+  candleCount: number;
+  summary: BacktestRunSummary;
+  sampleTrades: BacktestTrade[];
+  createdAt: Timestamp | FieldValue;
 }

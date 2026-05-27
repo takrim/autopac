@@ -1,6 +1,7 @@
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import { CONFIG } from "../config";
+import { getTradingConfig } from "../api/config";
 import { Signal } from "../types";
 import { logAudit } from "./audit";
 
@@ -36,6 +37,17 @@ async function checkDailyTradeLimit(): Promise<RiskCheckResult> {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
 
+  // Read live limit from Firestore tradingConfig (UI-editable), falling back to static CONFIG
+  let maxDaily: number = CONFIG.MAX_DAILY_TRADES;
+  try {
+    const tc = await getTradingConfig();
+    if (typeof tc.MAX_DAILY_TRADES === "number" && tc.MAX_DAILY_TRADES > 0) {
+      maxDaily = tc.MAX_DAILY_TRADES;
+    }
+  } catch (err) {
+    logger.warn("[RISK] Failed to read tradingConfig — using static CONFIG limit", { error: String(err) });
+  }
+
   const ordersToday = await db
     .collection("orders")
     .where("createdAt", ">=", Timestamp.fromDate(todayStart))
@@ -44,11 +56,11 @@ async function checkDailyTradeLimit(): Promise<RiskCheckResult> {
 
   const count = ordersToday.data().count;
 
-  if (count >= CONFIG.MAX_DAILY_TRADES) {
-    logger.warn(`[RISK] Daily trade limit reached: ${count}/${CONFIG.MAX_DAILY_TRADES}`);
+  if (count >= maxDaily) {
+    logger.warn(`[RISK] Daily trade limit reached: ${count}/${maxDaily}`);
     return {
       passed: false,
-      reason: `Daily trade limit reached (${CONFIG.MAX_DAILY_TRADES})`,
+      reason: `Daily trade limit reached (${maxDaily})`,
     };
   }
 

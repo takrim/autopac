@@ -319,7 +319,7 @@ export default function SettingsScreen() {
                 <View style={styles.divider} />
                 <TouchableOpacity
                   style={styles.row}
-                  onPress={() => handleNumberEdit("SIMULATED_FEE_RATE", "Fee Rate (e.g. 0.006 = 0.6%)", config.SIMULATED_FEE_RATE, 0, 0.1, 4)}
+                  onPress={() => handleNumberEdit("SIMULATED_FEE_RATE", "Fee Rate (e.g. 0.005 = 0.5% taker)", config.SIMULATED_FEE_RATE, 0, 0.1, 4)}
                   disabled={saving}
                 >
                   <Text style={styles.label}>Simulated Fee Rate</Text>

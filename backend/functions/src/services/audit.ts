@@ -18,9 +18,9 @@ export async function logAudit(
 ): Promise<void> {
   const entry: AuditEntry = {
     action,
-    signalId: opts.signalId,
-    userId: opts.userId,
-    details: opts.details,
+    ...(opts.signalId !== undefined ? { signalId: opts.signalId } : {}),
+    ...(opts.userId   !== undefined ? { userId:   opts.userId   } : {}),
+    ...(opts.details  !== undefined ? { details:  opts.details  } : {}),
     timestamp: FieldValue.serverTimestamp(),
   };
 
