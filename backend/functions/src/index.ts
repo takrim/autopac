@@ -40,7 +40,6 @@ import { handleTelegramWebhook } from "./webhooks/telegram";
 import { sendTelegramMessage } from "./services/telegram";
 // import { runBurstScanner } from "./services/burstScanner"; // disabled
 import { runPositionLiquidator } from "./services/positionLiquidator";
-import { runEmaPullbackScanner } from "./services/emaPullbackScanner";
 import { runDecisionAnalyzer } from "./services/decisionAnalyzer";
 import { analyzeStoredDecisionWithAI } from "./services/aiBurstAnalyze";
 import { sendEmail } from "./services/email";
@@ -196,30 +195,6 @@ export const positionLiquidator = onSchedule(
       const msg = String(err);
       logger.error("[POSITION_LIQUIDATOR] Scheduled run failed", { error: msg });
       await sendTelegramMessage(`⚠️ Position Liquidator FAILED:\n${msg}`).catch(() => {});
-    }
-  }
-);
-
-// EMA pullback scanner — every 3 minutes.
-// Tracks top-30 Coinbase symbols by 24h USD volume (rank ≤ 1000), stores
-// per-tick {price, vol, EMA200, RSI}, and BUYs on price-near-EMA + trend turn.
-// Owns its own exits: RSI≥80 trails 0.5% below price, EMA200 flat/down across
-// 3 ticks liquidates. positionLiquidator skips symbols opened by this scanner.
-export const emaPullbackScanner = onSchedule(
-  {
-    region: "us-central1",
-    schedule: "every 60 minutes", // DISABLED — was "every 3 minutes"
-    timeoutSeconds: 300,
-    maxInstances: 1,
-    secrets: ["COINGECKO_API_KEY", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
-  },
-  async () => {
-    try {
-      await runEmaPullbackScanner();
-    } catch (err) {
-      const msg = String(err);
-      logger.error("[EMA_PULLBACK_SCANNER] Scheduled run failed", { error: msg });
-      await sendTelegramMessage(`⚠️ EMA Pullback Scanner FAILED:\n${msg}`).catch(() => {});
     }
   }
 );

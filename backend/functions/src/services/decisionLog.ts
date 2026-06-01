@@ -9,7 +9,6 @@ const RETENTION_DAYS = 7;
 export type DecisionOutcome = "ACCEPTED" | "REJECTED";
 export type DecisionSource =
   | "burst_scanner"
-  | "ema_pullback_scanner"
   | "risk_check"
   | "manual_buy"
   | "webhook"
