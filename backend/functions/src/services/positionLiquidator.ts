@@ -21,7 +21,7 @@ import { sendTelegramMessage } from "./telegram";
 import { sendTrailingStopNotification } from "./notification";
 import { logDecision } from "./decisionLog";
 import { computeRSI } from "./strategies/shared";
-import { listRecentRsiDips } from "./rsiDip";
+import { listRecentRsiDips, enrichDipWithMassive } from "./rsiDip";
 import { isUsStockMarketOpen } from "./marketHours";
 import { isCryptoSymbol } from "../api/config";
 
@@ -84,6 +84,21 @@ async function fetchRsi3m(broker: IBroker, productId: string): Promise<number> {
     logger.warn("[LIQUIDATOR] RSI fetch failed", { productId, error: String(err) });
     return NaN;
   }
+}
+
+/**
+ * Enrich every Coinbase-routed dip with a fresh Massive sample (snapshot +
+ * 1h RSI + 1h MACD). Runs all symbols in parallel and never throws — Massive
+ * failures must not affect liquidation. Result is appended to the dip doc's
+ * `massive.history` array for later use by the bulltrend handler.
+ */
+async function enrichCoinbaseDips(dips: { symbol: string; exchange: "alpaca" | "coinbase" }[]): Promise<void> {
+  const coinbaseDips = dips.filter(d => d.exchange === "coinbase");
+  if (coinbaseDips.length === 0) return;
+  const results = await Promise.allSettled(coinbaseDips.map(d => enrichDipWithMassive(d.symbol)));
+  const ok = results.filter(r => r.status === "fulfilled" && r.value !== null).length;
+  const failed = results.length - ok;
+  logger.info("[LIQUIDATOR] Massive enrichment", { total: coinbaseDips.length, ok, failed });
 }
 
 function toProductId(sym: string): string {
@@ -630,6 +645,7 @@ export async function runPositionLiquidator(): Promise<void> {
       listRecentRsiDips(DIP_WINDOW_MS),
       getRecentStopFillSummaries(cbBroker),
     ]);
+    await enrichCoinbaseDips(dips);
     const windowMin = Math.round(DIP_WINDOW_MS / 60000);
     const dipLines = dips.length === 0
       ? `📭 *RSI dips* (last ${windowMin} min): none`
@@ -704,6 +720,7 @@ export async function runPositionLiquidator(): Promise<void> {
 
   // ── Active RSI-dip collection (buy candidates within bulltrend window) ──
   const dips = await listRecentRsiDips(DIP_WINDOW_MS);
+  await enrichCoinbaseDips(dips);
   const windowMin = Math.round(DIP_WINDOW_MS / 60000);
   if (dips.length === 0) {
     lines.push(`\n📭 *RSI dips* (last ${windowMin} min): none`);

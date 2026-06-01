@@ -9,9 +9,13 @@
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import { getBroker } from "../brokers";
+import { sampleForCoinbaseSymbol, MassiveSample } from "./massive";
 
 const db = getFirestore();
 const COLL = "rsi_dips";
+
+/** How many Massive samples to keep per dip doc (caps doc size growth). */
+const MASSIVE_HISTORY_CAP = 30;
 
 /**
  * Probe Alpaca first, then Coinbase. Returns the first exchange the symbol
@@ -45,6 +49,8 @@ export interface RsiDipDoc {
   exchange: "alpaca" | "coinbase";
   dipAt: Timestamp;
   lastBeartrendId: string | null;
+  /** Time-series of Massive enrichment samples (coinbase dips only). Capped to MASSIVE_HISTORY_CAP. */
+  massive?: { history: MassiveSample[] };
 }
 
 /** Upsert dip row for `symbol`; doc id = uppercase symbol. */
@@ -159,5 +165,30 @@ export async function listRecentRsiDips(
   } catch (err) {
     logger.warn("[RSI_DIP] listRecentRsiDips failed", { error: String(err) });
     return [];
+  }
+}
+
+/**
+ * Pull a fresh Massive sample for `symbol` (a Coinbase ticker like "BTC-USD")
+ * and append it to the dip doc's `massive.history` array. Caps the array to
+ * MASSIVE_HISTORY_CAP entries (FIFO). No-ops if the dip doc is missing or
+ * the sample fetch fails.
+ */
+export async function enrichDipWithMassive(symbol: string): Promise<MassiveSample | null> {
+  const id = symbol.toUpperCase();
+  const sample = await sampleForCoinbaseSymbol(id);
+  if (!sample) return null;
+  try {
+    const ref = db.collection(COLL).doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) return null;
+    const data = snap.data() as RsiDipDoc | undefined;
+    const prior = (data?.massive?.history ?? []).slice(-(MASSIVE_HISTORY_CAP - 1));
+    const next = [...prior, sample];
+    await ref.update({ "massive.history": next });
+    return sample;
+  } catch (err) {
+    logger.warn("[RSI_DIP] enrichDipWithMassive write failed", { symbol: id, error: String(err) });
+    return null;
   }
 }
