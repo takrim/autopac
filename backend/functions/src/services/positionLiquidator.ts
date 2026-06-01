@@ -35,7 +35,14 @@ const TRAIL_BUFFER_PCT         = 1.0;    // trailing stop = current × (1 − 1%
 const DEFAULT_SL_PCT           = 2.0;    // initial stop = current × (1 − 2.0%) when SL missing
 const PROFIT_LOCK_TRIGGER_PCT  = 2.0;    // PnL ≥ +2% → lock in profit
 const PROFIT_LOCK_OFFSET_PCT   = 1.0;    // profit-lock SL = entry × (1 + 1%)
+const TAKE_PROFIT_PNL_PCT      = 5.0;    // PnL ≥ +5% for N consecutive runs → liquidate
+const TAKE_PROFIT_ITERATIONS   = 3;      // N consecutive runs above threshold required
 const RSI_FETCH_COUNT          = 300;    // 1-min candles aggregated to 3-min
+
+// In-memory consecutive-iteration counter keyed by `${broker}|${productId}`.
+// maxInstances=1 keeps this warm across runs; a cold start resets the counter
+// (worst case = TAKE_PROFIT_ITERATIONS extra minutes before take-profit fires).
+const takeProfitStreak = new Map<string, number>();
 
 const IGNORED_SYMBOLS = new Set<string>(["IO-USD", "GNO-USD"]);
 
@@ -97,6 +104,7 @@ type Outcome =
   | { kind: "profit_lock_armed"; newSL: number }
   | { kind: "profit_lock_skipped_lower"; existingSL: number; proposedSL: number }
   | { kind: "default_sl_set"; newSL: number }
+  | { kind: "took_profit"; pnlPct: number; streak: number }
   | { kind: "held";       existingSL: number }
   | { kind: "no_action";  reason: string }
   | { kind: "error";      message: string };
@@ -402,6 +410,55 @@ export async function runPositionLiquidator(): Promise<void> {
     const stockSlSkip =
       brokerName === "alpaca" && !isCryptoSymbol(position.symbol) && !isUsStockMarketOpen();
 
+    // ── Take-profit branch (PnL ≥ +5% for N consecutive iterations) ────
+    // Counted before any SL branch so it takes precedence: once we've seen
+    // sustained profit, just close the position outright.
+    const tpKey = `${brokerName}|${productId}`;
+    if (pnlPct >= TAKE_PROFIT_PNL_PCT) {
+      const streak = (takeProfitStreak.get(tpKey) || 0) + 1;
+      takeProfitStreak.set(tpKey, streak);
+      if (streak >= TAKE_PROFIT_ITERATIONS) {
+        if (stockSlSkip) {
+          logger.info("[LIQUIDATOR] take-profit deferred (stock market closed)", { productId, pnlPct, streak });
+          results.push({ ...base, rsi, outcome: { kind: "no_action", reason: `TP deferred: market closed (streak=${streak})` } });
+          continue;
+        }
+        try {
+          logger.info("[LIQUIDATOR] taking profit", { productId, pnlPct, streak, threshold: TAKE_PROFIT_PNL_PCT });
+          await broker.liquidatePosition(position.symbol);
+          takeProfitStreak.delete(tpKey);
+          results.push({ ...base, rsi, outcome: { kind: "took_profit", pnlPct, streak } });
+          await sendTelegramMessage(
+            `💰 *Took profit* ${productId} @ +${pnlPct.toFixed(2)}% (${streak} iterations above ${TAKE_PROFIT_PNL_PCT}%)`
+          ).catch(() => {});
+          await logDecision({
+            source: "liquidator", outcome: "ACCEPTED", action: "SELL",
+            symbol: productId, price: current,
+            reason: `take-profit fired: ${streak} consecutive iterations ≥ ${TAKE_PROFIT_PNL_PCT}% PnL`,
+            expression: `PnL=${pnlPct.toFixed(2)}% ≥ ${TAKE_PROFIT_PNL_PCT}% × ${streak} runs → liquidate`,
+            params: { entry, current, pnl_pct: +pnlPct.toFixed(2), streak, threshold_pct: TAKE_PROFIT_PNL_PCT },
+          });
+        } catch (err) {
+          logger.error("[LIQUIDATOR] liquidatePosition threw (take-profit)", { productId, error: String(err) });
+          results.push({ ...base, rsi, outcome: { kind: "error", message: `TP liquidation failed: ${String(err).slice(0, 180)}` } });
+          await logDecision({
+            source: "liquidator", outcome: "REJECTED", action: "SELL",
+            symbol: productId, price: current,
+            reason: `take-profit liquidation failed: ${String(err).slice(0, 200)}`,
+            expression: `PnL=${pnlPct.toFixed(2)}% ≥ ${TAKE_PROFIT_PNL_PCT}% × ${streak} → broker.liquidatePosition threw`,
+            params: { entry, current, pnl_pct: +pnlPct.toFixed(2), streak },
+          });
+        }
+        continue;
+      }
+      // Streak still building — fall through so trailing/profit-lock SL logic
+      // keeps tightening the floor. Streak count is reported as part of the
+      // outcome of whichever SL branch runs below.
+      logger.info("[LIQUIDATOR] take-profit streak building", { productId, pnlPct, streak, needed: TAKE_PROFIT_ITERATIONS });
+    } else {
+      takeProfitStreak.delete(tpKey);
+    }
+
     // Profit-lock candidate (entry × 1.01) when PnL ≥ +2%; 0 if not applicable.
     const profitLockSL = (entry > 0 && pnlPct >= PROFIT_LOCK_TRIGGER_PCT)
       ? entry * (1 + PROFIT_LOCK_OFFSET_PCT / 100)
@@ -626,6 +683,9 @@ export async function runPositionLiquidator(): Promise<void> {
         break;
       case "default_sl_set":
         tail = `🆕 default SL set → ${r.outcome.newSL.toPrecision(5)} (${DEFAULT_SL_PCT}% below)`;
+        break;
+      case "took_profit":
+        tail = `💰 took profit (streak=${r.outcome.streak} ≥ ${TAKE_PROFIT_PNL_PCT}%)`;
         break;
       case "held":
         tail = `hold (SL ${r.outcome.existingSL.toPrecision(5)})`;
