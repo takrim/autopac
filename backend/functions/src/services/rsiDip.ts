@@ -86,6 +86,11 @@ export async function getRecentRsiDip(
     const dipMs = data.dipAt.toMillis();
     const ageMs = Date.now() - dipMs;
     if (ageMs > withinMs) return null;
+    // Backfill: dips written before the per-symbol exchange routing feature
+    // do not have `exchange`; treat them as coinbase.
+    if (data.exchange !== "alpaca" && data.exchange !== "coinbase") {
+      data.exchange = "coinbase";
+    }
     return { data, ageMs };
   } catch (err) {
     logger.warn("[RSI_DIP] getRecentRsiDip failed", { symbol: id, error: String(err) });
@@ -99,20 +104,23 @@ export async function getRecentRsiDip(
  */
 export async function listRecentRsiDips(
   withinMs: number,
-): Promise<{ symbol: string; ageMs: number; price: number | null; rsi: number | null }[]> {
+): Promise<{ symbol: string; ageMs: number; price: number | null; rsi: number | null; exchange: "alpaca" | "coinbase" }[]> {
   try {
     const cutoff = Timestamp.fromMillis(Date.now() - withinMs);
     const snap = await db.collection(COLL).where("dipAt", ">=", cutoff).get();
     const now = Date.now();
-    const out: { symbol: string; ageMs: number; price: number | null; rsi: number | null }[] = [];
+    const out: { symbol: string; ageMs: number; price: number | null; rsi: number | null; exchange: "alpaca" | "coinbase" }[] = [];
     snap.forEach(doc => {
       const d = doc.data() as RsiDipDoc;
       if (!d || !d.dipAt) return;
+      const exchange: "alpaca" | "coinbase" =
+        d.exchange === "alpaca" || d.exchange === "coinbase" ? d.exchange : "coinbase";
       out.push({
         symbol: d.symbol || doc.id,
         ageMs: now - d.dipAt.toMillis(),
         price: d.price ?? null,
         rsi: d.rsi ?? null,
+        exchange,
       });
     });
     out.sort((a, b) => a.ageMs - b.ageMs);

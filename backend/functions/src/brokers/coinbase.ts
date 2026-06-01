@@ -2,7 +2,7 @@ import { logger } from "firebase-functions/v2";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import * as crypto from "crypto";
 import { SignJWT, importPKCS8 } from "jose";
-import { IBroker, BrokerPosition, DetailedPosition } from "./interface";
+import { IBroker, BrokerPosition, DetailedPosition, Candle } from "./interface";
 import { PlaceOrderParams, PlaceOrderResult } from "../types";
 import { getCoinbaseConfig, CONFIG } from "../config";
 
@@ -1267,11 +1267,4 @@ export class CoinbaseBroker implements IBroker {
   }
 }
 
-export interface CbCandle {
-  start: number;
-  low: number;
-  high: number;
-  open: number;
-  close: number;
-  volume: number;
-}
+export type CbCandle = Candle;

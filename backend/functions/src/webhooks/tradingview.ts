@@ -738,16 +738,14 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
     const dipAgeSec = Math.round(recentDip.ageMs / 1000);
     logger.info("[BULLTREND] Recent RSI dip found", { symbol, dipAgeSec, dipPrice: recentDip.data.price, dipRsi: recentDip.data.rsi });
 
-    // --- Override broker from the dip doc (per-symbol exchange routing) ---
-    // Falls back to the allowlist-resolved broker for legacy dip docs without `exchange`.
-    if (recentDip.data.exchange === "alpaca" || recentDip.data.exchange === "coinbase") {
-      if (recentDip.data.exchange !== bulltrendBroker) {
-        logger.info("[BULLTREND] Routing by stored dip exchange", {
-          symbol, allowlistBroker: bulltrendBroker, dipBroker: recentDip.data.exchange,
-        });
-      }
-      bulltrendBroker = recentDip.data.exchange;
+    // --- Route by the dip doc's stamped exchange (per-symbol exchange routing).
+    // Legacy dip docs without `exchange` are defaulted to "coinbase" by getRecentRsiDip.
+    if (recentDip.data.exchange !== bulltrendBroker) {
+      logger.info("[BULLTREND] Routing by stored dip exchange", {
+        symbol, allowlistBroker: bulltrendBroker, dipBroker: recentDip.data.exchange,
+      });
     }
+    bulltrendBroker = recentDip.data.exchange;
 
     // --- Pyramid guard: block duplicate buy if position already exists ---
     if (!tradingConfig.ORDER_PYRAMID) {

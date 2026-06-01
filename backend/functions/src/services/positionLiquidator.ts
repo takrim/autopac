@@ -1,7 +1,7 @@
 /**
  * Position Liquidator
  *
- * Runs every 1 minute on Coinbase positions.
+ * Runs every 1 minute on open positions across all supported brokers.
  *
  * Per position (excluding IGNORED_SYMBOLS):
  *   • compute RSI(14) on 3-min closes (aggregated from 1-min candles)
@@ -16,7 +16,7 @@
 import { logger } from "firebase-functions/v2";
 import { getBroker } from "../brokers";
 import { CoinbaseBroker } from "../brokers/coinbase";
-import { DetailedPosition } from "../brokers/interface";
+import { DetailedPosition, IBroker } from "../brokers/interface";
 import { sendTelegramMessage } from "./telegram";
 import { sendTrailingStopNotification } from "./notification";
 import { logDecision } from "./decisionLog";
@@ -36,6 +36,11 @@ const PROFIT_LOCK_OFFSET_PCT   = 1.0;    // profit-lock SL = entry × (1 + 1%)
 const RSI_FETCH_COUNT          = 300;    // 1-min candles aggregated to 3-min
 
 const IGNORED_SYMBOLS = new Set<string>(["IO-USD", "GNO-USD"]);
+
+// Brokers iterated by the liquidator. Old rsi_dip docs without `exchange` are
+// treated as coinbase elsewhere; positions are pulled directly from each broker.
+const LIQUIDATOR_BROKERS = ["coinbase", "alpaca"] as const;
+type LiqBrokerName = typeof LIQUIDATOR_BROKERS[number];
 
 const DIP_WINDOW_MS = 27 * 60 * 1000;   // mirror bulltrend RSI-dip gate window
 const RECENT_STOPS_LIMIT = 5;           // recent stop-out summaries shown in heartbeat
@@ -57,8 +62,9 @@ function aggregateTo3MinCloses(candles: { start: number; close: number }[]): num
   return out.map(b => b.close);
 }
 
-async function fetchRsi3m(broker: CoinbaseBroker, productId: string): Promise<number> {
+async function fetchRsi3m(broker: IBroker, productId: string): Promise<number> {
   try {
+    if (!broker.getCandles) return NaN;
     const oneMin = await broker.getCandles(productId, "ONE_MINUTE", RSI_FETCH_COUNT);
     const threeMin = aggregateTo3MinCloses(oneMin);
     if (threeMin.length < RSI_PERIOD + 1) return NaN;
@@ -72,8 +78,13 @@ async function fetchRsi3m(broker: CoinbaseBroker, productId: string): Promise<nu
 }
 
 function toProductId(sym: string): string {
+  // Coinbase canonical product id form. Alpaca positions arrive as "BTC/USD" or
+  // "AAPL" and are normalised by the broker layer, so this is only used for
+  // display + heartbeat parity.
   const s = sym.toUpperCase();
-  return s.includes("-") ? s : `${s}-USD`;
+  if (s.includes("-")) return s;
+  if (s.includes("/")) return s.replace("/", "-");
+  return /USDT?$/.test(s) ? `${s.replace(/USDT?$/, "")}-USD` : s;
 }
 
 type Outcome =
@@ -89,6 +100,7 @@ type Outcome =
   | { kind: "error";      message: string };
 
 interface PerPosition {
+  broker: LiqBrokerName;
   productId: string;
   entry: number;
   current: number;
@@ -193,63 +205,53 @@ export async function runPositionLiquidator(): Promise<void> {
   const tStart = Date.now();
   logger.info("[LIQUIDATOR] Starting run");
 
-  const broker = getBroker("coinbase") as CoinbaseBroker;
+  // Coinbase broker kept around for the Coinbase-only recent-stops summary.
+  const cbBroker = getBroker("coinbase") as CoinbaseBroker;
 
-  let positions: DetailedPosition[] = [];
-  try {
-    if (broker.getDetailedPositions) {
-      positions = await broker.getDetailedPositions();
-    }
-  } catch (err) {
-    logger.error("[LIQUIDATOR] Failed to fetch positions", { error: String(err) });
-    await sendTelegramMessage(`⚠️ *Liquidator* — failed to fetch positions\n${String(err).slice(0, 250)}`).catch(() => {});
-    return;
-  }
-
-  if (positions.length === 0) {
-    logger.info("[LIQUIDATOR] No open positions");
-    const [dips, recentStops] = await Promise.all([
-      listRecentRsiDips(DIP_WINDOW_MS),
-      getRecentStopFillSummaries(broker),
-    ]);
-    const windowMin = Math.round(DIP_WINDOW_MS / 60000);
-    const dipLines = dips.length === 0
-      ? `📭 *RSI dips* (last ${windowMin} min): none`
-      : `📉 *RSI dips* (last ${windowMin} min, ${dips.length}):\n` +
-        dips.map(d => {
-          const ageSec = Math.round(d.ageMs / 1000);
-          const priceStr = d.price !== null ? d.price.toPrecision(5) : "n/a";
-          const rsiStr = d.rsi !== null ? d.rsi.toFixed(1) : "n/a";
-          return `  • ${d.symbol} @${priceStr} RSI=${rsiStr} (${ageSec}s ago)`;
-        }).join("\n");
-    const stopsBlock = formatStopFillLines(recentStops);
-    await sendTelegramMessage(`🫥 *Liquidator heartbeat* — no open positions\n\n${dipLines}\n\n${stopsBlock}`).catch(() => {});
-    return;
-  }
-
+  const positions: DetailedPosition[] = [];
   const results: PerPosition[] = [];
 
-  for (const position of positions) {
-    const productId  = toProductId(position.symbol);
-    const entry      = parseFloat(position.avg_entry_price) || 0;
-    const current    = parseFloat(position.current_price)   || 0;
-    const existingSL = position.stop_loss ? parseFloat(position.stop_loss) || 0 : 0;
-    const pnlPct     = entry > 0 ? ((current - entry) / entry) * 100 : 0;
-    const ignored    = IGNORED_SYMBOLS.has(productId);
-
-    const base = { productId, entry, current, existingSL, pnlPct, ignored };
-
-    if (ignored) {
-      results.push({ ...base, rsi: NaN, outcome: { kind: "no_action", reason: "ignored symbol" } });
+  for (const brokerName of LIQUIDATOR_BROKERS) {
+    let broker: IBroker;
+    try {
+      broker = getBroker(brokerName);
+    } catch (err) {
+      logger.warn("[LIQUIDATOR] Skipping broker (init failed)", { brokerName, error: String(err) });
       continue;
     }
 
-    if (current <= 0) {
-      results.push({ ...base, rsi: NaN, outcome: { kind: "no_action", reason: "no current price" } });
+    let brokerPositions: DetailedPosition[] = [];
+    try {
+      if (broker.getDetailedPositions) {
+        brokerPositions = await broker.getDetailedPositions();
+      }
+    } catch (err) {
+      logger.warn("[LIQUIDATOR] Failed to fetch positions", { brokerName, error: String(err) });
       continue;
     }
+    positions.push(...brokerPositions);
 
-    const rsi = await fetchRsi3m(broker, productId);
+    for (const position of brokerPositions) {
+      const productId  = toProductId(position.symbol);
+      const entry      = parseFloat(position.avg_entry_price) || 0;
+      const current    = parseFloat(position.current_price)   || 0;
+      const existingSL = position.stop_loss ? parseFloat(position.stop_loss) || 0 : 0;
+      const pnlPct     = entry > 0 ? ((current - entry) / entry) * 100 : 0;
+      const ignored    = IGNORED_SYMBOLS.has(productId);
+
+      const base = { broker: brokerName, productId, entry, current, existingSL, pnlPct, ignored };
+
+      if (ignored) {
+        results.push({ ...base, rsi: NaN, outcome: { kind: "no_action", reason: "ignored symbol" } });
+        continue;
+      }
+
+      if (current <= 0) {
+        results.push({ ...base, rsi: NaN, outcome: { kind: "no_action", reason: "no current price" } });
+        continue;
+      }
+
+      const rsi = await fetchRsi3m(broker, position.symbol);
 
     // Profit-lock candidate (entry × 1.01) when PnL ≥ +2%; 0 if not applicable.
     const profitLockSL = (entry > 0 && pnlPct >= PROFIT_LOCK_TRIGGER_PCT)
@@ -265,7 +267,7 @@ export async function runPositionLiquidator(): Promise<void> {
         continue;
       }
       try {
-        const result = await broker.updateStopLoss(productId, newSL);
+        const result = await broker.updateStopLoss!(position.symbol, newSL);
         if (!result.success) {
           logger.warn("[LIQUIDATOR] updateStopLoss rejected (trail)", { productId, message: result.message });
           results.push({ ...base, rsi, outcome: { kind: "error", message: `trail rejected: ${result.message ?? "broker"}` } });
@@ -316,7 +318,7 @@ export async function runPositionLiquidator(): Promise<void> {
         continue;
       }
       try {
-        const result = await broker.updateStopLoss(productId, profitLockSL);
+        const result = await broker.updateStopLoss!(position.symbol, profitLockSL);
         if (!result.success) {
           logger.warn("[LIQUIDATOR] updateStopLoss rejected (profit-lock)", { productId, message: result.message });
           results.push({ ...base, rsi, outcome: { kind: "error", message: `profit-lock rejected: ${result.message ?? "broker"}` } });
@@ -361,7 +363,7 @@ export async function runPositionLiquidator(): Promise<void> {
     if (existingSL <= 0) {
       const newSL = current * (1 - DEFAULT_SL_PCT / 100);
       try {
-        const result = await broker.updateStopLoss(productId, newSL);
+        const result = await broker.updateStopLoss!(position.symbol, newSL);
         if (!result.success) {
           logger.warn("[LIQUIDATOR] updateStopLoss rejected (default)", { productId, message: result.message });
           results.push({ ...base, rsi, outcome: { kind: "error", message: `default SL rejected: ${result.message ?? "broker"}` } });
@@ -397,6 +399,29 @@ export async function runPositionLiquidator(): Promise<void> {
 
     // ── Hold branch (SL already set, RSI < 80) ──────────────────────────
     results.push({ ...base, rsi, outcome: { kind: "held", existingSL } });
+    }
+  }
+
+  // ── No positions across all brokers ──────────────────────────────────
+  if (positions.length === 0) {
+    logger.info("[LIQUIDATOR] No open positions");
+    const [dips, recentStops] = await Promise.all([
+      listRecentRsiDips(DIP_WINDOW_MS),
+      getRecentStopFillSummaries(cbBroker),
+    ]);
+    const windowMin = Math.round(DIP_WINDOW_MS / 60000);
+    const dipLines = dips.length === 0
+      ? `📭 *RSI dips* (last ${windowMin} min): none`
+      : `📉 *RSI dips* (last ${windowMin} min, ${dips.length}):\n` +
+        dips.map(d => {
+          const ageSec = Math.round(d.ageMs / 1000);
+          const priceStr = d.price !== null ? d.price.toPrecision(5) : "n/a";
+          const rsiStr = d.rsi !== null ? d.rsi.toFixed(1) : "n/a";
+          return `  • [${d.exchange}] ${d.symbol} @${priceStr} RSI=${rsiStr} (${ageSec}s ago)`;
+        }).join("\n");
+    const stopsBlock = formatStopFillLines(recentStops);
+    await sendTelegramMessage(`🫥 *Liquidator heartbeat* — no open positions\n\n${dipLines}\n\n${stopsBlock}`).catch(() => {});
+    return;
   }
 
   // ── Heartbeat ────────────────────────────────────────────────────────
@@ -449,7 +474,7 @@ export async function runPositionLiquidator(): Promise<void> {
         break;
     }
     lines.push(
-      `  • ${r.productId} ${pnlSign}${r.pnlPct.toFixed(2)}% px=${r.current.toPrecision(5)} RSI=${rsiStr} SL=${slStr} — ${tail}`,
+      `  • [${r.broker}] ${r.productId} ${pnlSign}${r.pnlPct.toFixed(2)}% px=${r.current.toPrecision(5)} RSI=${rsiStr} SL=${slStr} — ${tail}`,
     );
   }
 
@@ -464,12 +489,12 @@ export async function runPositionLiquidator(): Promise<void> {
       const ageSec = Math.round(d.ageMs / 1000);
       const priceStr = d.price !== null ? d.price.toPrecision(5) : "n/a";
       const rsiStr = d.rsi !== null ? d.rsi.toFixed(1) : "n/a";
-      lines.push(`  • ${d.symbol} @${priceStr} RSI=${rsiStr} (${ageSec}s ago)`);
+      lines.push(`  • [${d.exchange}] ${d.symbol} @${priceStr} RSI=${rsiStr} (${ageSec}s ago)`);
     }
   }
 
   // ── Recent stop-loss executions (entry, exit, USD P&L) ──
-  const recentStops = await getRecentStopFillSummaries(broker);
+  const recentStops = await getRecentStopFillSummaries(cbBroker);
   lines.push("\n" + formatStopFillLines(recentStops));
 
   await sendTelegramMessage(lines.join("\n")).catch(() => {});

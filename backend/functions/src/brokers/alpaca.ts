@@ -1,6 +1,6 @@
 import { logger } from "firebase-functions/v2";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { IBroker, BrokerPosition } from "./interface";
+import { IBroker, BrokerPosition, DetailedPosition, Candle } from "./interface";
 import { PlaceOrderParams, PlaceOrderResult } from "../types";
 import { getAlpacaConfig, CONFIG } from "../config";
 
@@ -561,6 +561,129 @@ export class AlpacaBroker implements IBroker {
         timestamp: FieldValue.serverTimestamp(),
       });
       return { success: false, message: `Error: ${String(err)}` };
+    }
+  }
+
+  /**
+   * Fetch all open positions with PnL + open stop-loss price (if any).
+   * Symbol returned in Alpaca's canonical form (e.g. "BTC/USD", "AAPL").
+   */
+  async getDetailedPositions(): Promise<DetailedPosition[]> {
+    const config = this.getConfig();
+    const headers = this.getHeaders();
+
+    let rawPositions: Array<Record<string, string>> = [];
+    try {
+      const resp = await fetch(`${config.baseUrl}/v2/positions`, { headers });
+      if (!resp.ok) {
+        logger.warn("[ALPACA] getDetailedPositions: positions fetch failed", { status: resp.status });
+        return [];
+      }
+      rawPositions = (await resp.json()) as Array<Record<string, string>>;
+    } catch (err) {
+      logger.warn("[ALPACA] getDetailedPositions: positions error", { err: String(err) });
+      return [];
+    }
+
+    if (rawPositions.length === 0) return [];
+
+    // Index open stop / stop_limit SELL orders by symbol → stop_price.
+    const stopPriceBySymbol = new Map<string, string>();
+    try {
+      const ordersResp = await fetch(
+        `${config.baseUrl}/v2/orders?status=open&limit=500`,
+        { headers },
+      );
+      if (ordersResp.ok) {
+        const orders = (await ordersResp.json()) as Array<Record<string, string>>;
+        for (const o of orders) {
+          if (o.side !== "sell") continue;
+          if (o.type !== "stop" && o.type !== "stop_limit") continue;
+          if (o.stop_price && o.symbol) stopPriceBySymbol.set(o.symbol, o.stop_price);
+        }
+      }
+    } catch (err) {
+      logger.warn("[ALPACA] getDetailedPositions: orders fetch error (non-fatal)", { err: String(err) });
+    }
+
+    return rawPositions.map((p) => {
+      const symbol = p.symbol || "";
+      const stopLoss = stopPriceBySymbol.get(symbol);
+      return {
+        symbol,
+        qty: p.qty || "0",
+        avg_entry_price: p.avg_entry_price || "0",
+        current_price: p.current_price || "0",
+        market_value: p.market_value || "0",
+        cost_basis: p.cost_basis || "0",
+        unrealized_pl: p.unrealized_pl || "0",
+        unrealized_plpc: p.unrealized_plpc || "0",
+        unrealized_intraday_pl: p.unrealized_intraday_pl || "0",
+        unrealized_intraday_plpc: p.unrealized_intraday_plpc || "0",
+        change_today: p.change_today || "0",
+        side: p.side || "long",
+        asset_class: p.asset_class || "",
+        ...(stopLoss !== undefined && { stop_loss: stopLoss }),
+      } as DetailedPosition;
+    });
+  }
+
+  /**
+   * Fetch OHLCV bars for a symbol, oldest-first.
+   * Routes to the crypto or equities data API based on the symbol form.
+   */
+  async getCandles(
+    symbol: string,
+    granularity: "ONE_MINUTE" | "FIVE_MINUTE" | "FIFTEEN_MINUTE" | "ONE_HOUR",
+    count: number,
+  ): Promise<Candle[]> {
+    const headers = this.getHeaders();
+    const tfMap: Record<string, string> = {
+      ONE_MINUTE: "1Min",
+      FIVE_MINUTE: "5Min",
+      FIFTEEN_MINUTE: "15Min",
+      ONE_HOUR: "1Hour",
+    };
+    const timeframe = tfMap[granularity] ?? "1Min";
+
+    const { symbol: alpacaSymbol, isCrypto } = this.toAlpacaSymbol(symbol);
+    // Pull a little extra to allow for missing bars.
+    const limit = Math.min(Math.max(count + 5, 50), 10000);
+
+    try {
+      let url: string;
+      if (isCrypto) {
+        // Crypto data endpoint: v1beta3, symbol format "BTC/USD".
+        url = `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${encodeURIComponent(alpacaSymbol)}&timeframe=${timeframe}&limit=${limit}&sort=asc`;
+      } else {
+        // Stocks data endpoint: v2.
+        url = `https://data.alpaca.markets/v2/stocks/bars?symbols=${encodeURIComponent(alpacaSymbol)}&timeframe=${timeframe}&limit=${limit}&sort=asc&feed=iex`;
+      }
+
+      const resp = await fetch(url, { headers });
+      if (!resp.ok) {
+        logger.warn("[ALPACA] getCandles fetch failed", { symbol: alpacaSymbol, status: resp.status });
+        return [];
+      }
+      const data = await resp.json() as { bars?: Record<string, Array<Record<string, string | number>>> };
+      const barsBySymbol = data.bars || {};
+      const rawBars = barsBySymbol[alpacaSymbol] || [];
+      if (!Array.isArray(rawBars) || rawBars.length === 0) return [];
+
+      const candles: Candle[] = rawBars.map((b) => ({
+        start: Math.floor(new Date(String(b.t)).getTime() / 1000),
+        open: Number(b.o) || 0,
+        high: Number(b.h) || 0,
+        low: Number(b.l) || 0,
+        close: Number(b.c) || 0,
+        volume: Number(b.v) || 0,
+      })).filter((c) => Number.isFinite(c.start));
+
+      candles.sort((a, b) => a.start - b.start);
+      return candles.slice(-count);
+    } catch (err) {
+      logger.warn("[ALPACA] getCandles error", { symbol: alpacaSymbol, err: String(err) });
+      return [];
     }
   }
 }

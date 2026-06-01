@@ -43,4 +43,24 @@ export interface IBroker {
   getDetailedPositions?(): Promise<DetailedPosition[]>;
   /** Check whether a symbol is tradeable on this exchange. Used by the RSI dip collector to stamp `exchange`. */
   assetExists?(symbol: string): Promise<boolean>;
+  /** Fetch OHLCV bars (oldest-first) for `symbol`. Used by the liquidator for RSI. */
+  getCandles?(
+    symbol: string,
+    granularity: "ONE_MINUTE" | "FIVE_MINUTE" | "FIFTEEN_MINUTE" | "ONE_HOUR",
+    count: number,
+  ): Promise<Candle[]>;
+  /** Place/replace a stop-loss order. Used by the liquidator. */
+  updateStopLoss?(
+    symbol: string,
+    newStopPrice: number,
+  ): Promise<{ success: boolean; orderId?: string; message: string }>;
+}
+
+export interface Candle {
+  start: number;   // unix seconds, bar open time
+  low: number;
+  high: number;
+  open: number;
+  close: number;
+  volume: number;
 }
