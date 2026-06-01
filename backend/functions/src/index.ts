@@ -186,7 +186,7 @@ export const positionLiquidator = onSchedule(
     schedule: "every 1 minutes",
     timeoutSeconds: 120,
     maxInstances: 1,
-    secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
   },
   async () => {
     try {
