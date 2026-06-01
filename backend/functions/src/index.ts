@@ -38,7 +38,7 @@ import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
 import { handleTelegramWebhook } from "./webhooks/telegram";
 import { sendTelegramMessage } from "./services/telegram";
-import { runBurstScanner } from "./services/burstScanner";
+// import { runBurstScanner } from "./services/burstScanner"; // disabled
 import { runPositionLiquidator } from "./services/positionLiquidator";
 import { runEmaPullbackScanner } from "./services/emaPullbackScanner";
 import { runDecisionAnalyzer } from "./services/decisionAnalyzer";
@@ -95,7 +95,7 @@ export const webhook = onRequest(
     maxInstances: 10,
     timeoutSeconds: 120,
     invoker: "public",
-    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET"],
+    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "COINGECKO_API_KEY"],
   },
   webhookApp
 );
@@ -135,27 +135,26 @@ export const tgbot = onRequest(
   tgbotApp
 );
 
-// Burst scanner — every 15 minutes.
-// Fetches CoinGecko top 1h gainers + trending coins, scores candidates,
-// and auto-executes BUY orders on Coinbase for the top qualified symbols.
-export const burstScanner = onSchedule(
-  {
-    region: "us-central1",
-    schedule: "every 5 minutes",
-    timeoutSeconds: 300,
-    maxInstances: 1,
-    secrets: ["COINGECKO_API_KEY", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
-  },
-  async () => {
-    try {
-      await runBurstScanner();
-    } catch (err) {
-      const msg = String(err);
-      logger.error("[BURST_SCANNER] Scheduled run failed", { error: msg });
-      await sendTelegramMessage(`⚠️ Burst Scanner FAILED:\n${msg}`).catch(() => {});
-    }
-  }
-);
+// Burst scanner — DISABLED. Export removed so next deploy deletes the function.
+// To re-enable, uncomment the export below.
+// export const burstScanner = onSchedule(
+//   {
+//     region: "us-central1",
+//     schedule: "every 5 minutes",
+//     timeoutSeconds: 300,
+//     maxInstances: 1,
+//     secrets: ["COINGECKO_API_KEY", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+//   },
+//   async () => {
+//     try {
+//       await runBurstScanner();
+//     } catch (err) {
+//       const msg = String(err);
+//       logger.error("[BURST_SCANNER] Scheduled run failed", { error: msg });
+//       await sendTelegramMessage(`⚠️ Burst Scanner FAILED:\n${msg}`).catch(() => {});
+//     }
+//   }
+// );
 
 // Scheduled news monitor — every 10 minutes.
 // Fetches Google News for active BUY signals + open positions, scores headlines

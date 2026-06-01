@@ -13,7 +13,6 @@ import { queryDecisions, DecisionOutcome } from "../services/decisionLog";
 import { runCgBacktest, CgBacktestInput, CgBacktestResult } from "../services/cgBacktest";
 import { runDecisionAnalyzer } from "../services/decisionAnalyzer";
 import { analyzeStoredDecisionWithAI, normaliseProductId } from "../services/aiBurstAnalyze";
-import { inspectEmaPullback } from "../services/emaPullbackScanner";
 import { formatSeattleDateTime, formatSeattleShort } from "../services/timeFormat";
 import { sendEmail } from "../services/email";
 
@@ -816,20 +815,6 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         await replyTo(chatId, `❌ Analysis failed: ${String(err).slice(0, 300)}`);
       }
       res.json({ ok: true });
-    } else if (lower === "/emawhy" || lower.startsWith("/emawhy ")) {
-      const sym = text.trim().split(/\s+/).slice(1).join("").trim();
-      if (!sym) {
-        await replyTo(chatId, "Usage: /emawhy <symbol>  e.g. /emawhy BILL or /emawhy BILL-USD");
-      } else {
-        await replyTo(chatId, `🔍 Inspecting ${sym.toUpperCase()} for EMA pullback…`);
-        try {
-          const report = await inspectEmaPullback(sym);
-          await replyTo(chatId, report);
-        } catch (err) {
-          await replyTo(chatId, `❌ Inspect failed: ${String(err).slice(0, 300)}`);
-        }
-      }
-      res.json({ ok: true });
     } else if (lower === "/help" || lower === "/start") {
       const helpText = [
         "🤖 *AutoPac Bot — Command Reference*",
@@ -847,13 +832,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "*/trend*",
         "  Run trend analysis now (RSI, momentum, news sentiment).",
         "",
-        "━━━ 🔍 EMA Pullback Scanner ━━━",
-        "",
-        "*/emawhy* <symbol>",
-        "  Diagnose why the EMA pullback scanner didn't buy a symbol — universe check, warmup status, and gate-by-gate breakdown.",
-        "  Example: /emawhy ATOM  or  /emawhy ATOM-USD",
-        "",
-        "━━━ 📜 Decision Log ━━━",
+        "━━━  Decision Log ━━━",
         "",
         "*/decisions* [symbol] [accepted|rejected] [Nd]",
         "  Query the structured trade-decision log. Tokens can be in any order.",

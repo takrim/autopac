@@ -254,3 +254,64 @@ export async function sendExitNotification(
     "EXIT_WIN"
   );
 }
+
+/**
+ * Push fired when the bulltrend webhook auto-executes a BUY after category check.
+ */
+export async function sendBulltrendBuyNotification(
+  symbol: string,
+  price: number,
+  signalId: string
+): Promise<void> {
+  const priceStr = price >= 1
+    ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    : `$${price.toPrecision(4)}`;
+  await sendPushToAllTokens(
+    "🐂 Bulltrend BUY",
+    `Bulltrend BUY: ${symbol} @ ${priceStr}`,
+    { type: "BULLTREND_BUY", signalId, symbol, price: String(price) },
+    "BULLTREND_BUY"
+  );
+}
+
+/**
+ * Push fired by positionLiquidator when a trailing stop is armed or raised.
+ */
+export async function sendTrailingStopNotification(
+  symbol: string,
+  newSL: number,
+  gainPct: number,
+  raised: boolean
+): Promise<void> {
+  const slStr = newSL >= 1
+    ? `$${newSL.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    : `$${newSL.toPrecision(4)}`;
+  const sign = gainPct >= 0 ? "+" : "";
+  await sendPushToAllTokens(
+    raised ? "🔼 Trailing Stop Raised" : "🛡️ Trailing Stop Armed",
+    `${symbol}: SL → ${slStr} (P/L ${sign}${gainPct.toFixed(2)}%)`,
+    { type: "TRAILING_STOP", symbol, newSL: String(newSL), gainPct: gainPct.toFixed(2), raised: String(raised) },
+    raised ? "TRAILING_STOP_RAISED" : "TRAILING_STOP_ARMED"
+  );
+}
+
+/**
+ * Generic push fired by executeOrder() after any successful BUY, regardless of
+ * the originating strategy (bulltrend, manual, auto-approve, etc.).
+ */
+export async function sendBuyExecutedNotification(
+  symbol: string,
+  price: number,
+  strategy: string,
+  signalId: string
+): Promise<void> {
+  const priceStr = price >= 1
+    ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    : `$${price.toPrecision(4)}`;
+  await sendPushToAllTokens(
+    "✅ BUY executed",
+    `${strategy}: ${symbol} @ ${priceStr}`,
+    { type: "BUY_EXECUTED", signalId, symbol, price: String(price), strategy },
+    "BUY_EXECUTED"
+  );
+}

@@ -32,6 +32,7 @@ const MIN_PRICE_USD       = 0.01;       // skip sub-penny tokens
 const MIN_VOLUME_USD      = 75_000;     // 24h volume floor (USD)
 const MAX_MARKET_CAP_RANK = 1000;       // filter out micro-caps
 const MAX_BUYS_PER_RUN    = 2;          // cap orders per invocation
+const BUYING_ENABLED      = false;      // kill-switch: scanner still scans + reports, but skips all buys when false
 const COOLDOWN_HOURS      = 0;          // cooldown disabled (set > 0 to re-enable)
 const COOLDOWN_COLLECTION = "_burst_scanner_cooldowns";
 const CG_BASE             = "https://pro-api.coingecko.com/api/v3";
@@ -1076,6 +1077,12 @@ export async function runBurstScanner(): Promise<void> {
     // payload we pass so Coinbase sees the product id (e.g. ETH-USD), not "ETHUSD".
     const orderSignal: Signal = { ...vipSignal, id: signalId, symbol: productId, status: "APPROVED" };
 
+    if (!BUYING_ENABLED) {
+      logger.info("[BURST] VIP buy skipped — BUYING_ENABLED=false", { signalId, symbol: productId, price: vipPrice });
+      vipSkipped.push({ productId, signalId, reason: "buying disabled" });
+      continue;
+    }
+
     logger.info("[BURST] VIP executing order", { signalId, symbol: productId, price: vipPrice });
     try {
       const result = await executeOrder(orderSignal, BURST_USER_ID);
@@ -1281,6 +1288,12 @@ export async function runBurstScanner(): Promise<void> {
       gain1h: `${usd_24h_change.toFixed(2)}%`,
       signal: entryResult.signal,
     });
+
+    if (!BUYING_ENABLED) {
+      logger.info("[BURST] Buy skipped — BUYING_ENABLED=false", { symbol: productId, price });
+      skipped.push({ productId, gain: usd_24h_change, vol: usd_24h_vol, rank: market_cap_rank, reason: "buying disabled", rsi: entryResult.rsi });
+      continue;
+    }
 
     try {
       const result = await executeOrder(signal, BURST_USER_ID);

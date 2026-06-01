@@ -8,6 +8,7 @@ import { getBroker } from "../brokers";
 import { runRiskChecks } from "../services/risk";
 import { logAudit } from "../services/audit";
 import { logDecision } from "../services/decisionLog";
+import { sendBuyExecutedNotification } from "../services/notification";
 
 const db = getFirestore();
 
@@ -268,6 +269,17 @@ export async function executeOrder(
         message: brokerResult.message,
       },
     });
+
+    if (brokerResult.success && signal.action === "BUY") {
+      await sendBuyExecutedNotification(
+        signal.symbol,
+        signal.price,
+        signal.strategy || "buy",
+        signal.id || ""
+      ).catch((err) => {
+        logger.warn("[TRADE] Buy push notification failed (non-fatal)", { signalId: signal.id, symbol: signal.symbol, error: String(err) });
+      });
+    }
 
     return {
       orderId: orderRef.id,
