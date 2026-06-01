@@ -93,10 +93,7 @@ export async function handleListSignals(req: Request, res: Response): Promise<vo
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
 
   try {
-    const tradingConfig = await getTradingConfig();
-    const brokerSettings = getActiveBrokerSettings(tradingConfig);
     let query = db.collection("signals")
-      .where("broker", "==", tradingConfig.ACTIVE_BROKER)
       .orderBy("createdAt", "desc")
       .limit(limit);
 
@@ -110,13 +107,7 @@ export async function handleListSignals(req: Request, res: Response): Promise<vo
     }
 
     const snapshot = await query.get();
-    let signals = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
-    // Filter to allowlist symbols if configured
-    if (brokerSettings.allowedSymbols.length > 0) {
-      const allowed = new Set(brokerSettings.allowedSymbols);
-      signals = signals.filter((s: any) => allowed.has(s.symbol));
-    }
+    const signals = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
     res.json({ signals });
   } catch (err) {
@@ -162,22 +153,13 @@ export async function handleListOrders(req: Request, res: Response): Promise<voi
 
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
 
-  const tradingConfig = await getTradingConfig();
-  const brokerSettings = getActiveBrokerSettings(tradingConfig);
   const snapshot = await db
     .collection("orders")
-    .where("broker", "==", tradingConfig.ACTIVE_BROKER)
     .orderBy("createdAt", "desc")
     .limit(limit)
     .get();
 
-  let orders = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
-  // Filter to allowlist symbols if configured
-  if (brokerSettings.allowedSymbols.length > 0) {
-    const allowed = new Set(brokerSettings.allowedSymbols);
-    orders = orders.filter((o: any) => allowed.has(o.symbol));
-  }
+  const orders = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
   res.json({ orders });
 }
@@ -274,11 +256,7 @@ export async function handleListDecisions(req: Request, res: Response): Promise<
   const decision = req.query.decision as string | undefined;
   const handler = req.query.handler as string | undefined;
 
-  const tradingConfig = await getTradingConfig();
-  const brokerSettings = getActiveBrokerSettings(tradingConfig);
-
   let query: any = db.collection("signal_decisions")
-    .where("broker", "==", tradingConfig.ACTIVE_BROKER)
     .orderBy("createdAt", "desc")
     .limit(limit);
 
@@ -293,13 +271,7 @@ export async function handleListDecisions(req: Request, res: Response): Promise<
   }
 
   const snapshot = await query.get();
-  let decisions = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
-
-  // Filter to allowlist symbols if configured
-  if (brokerSettings.allowedSymbols.length > 0) {
-    const allowed = new Set(brokerSettings.allowedSymbols);
-    decisions = decisions.filter((d: any) => allowed.has(d.symbol));
-  }
+  const decisions = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
 
   res.json({ decisions });
 }

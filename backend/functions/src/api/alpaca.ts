@@ -61,7 +61,9 @@ export async function handleGetAccount(req: Request, res: Response): Promise<voi
 }
 
 /**
- * GET /positions — returns open positions with P&L, routed by active broker.
+ * GET /positions — returns open positions across BOTH Alpaca and Coinbase.
+ * Each row is stamped with `broker: "alpaca" | "coinbase"`. `cashBalance` and
+ * `performance` come from Coinbase (Alpaca cash is exposed via /account).
  */
 export async function handleGetPositions(req: Request, res: Response): Promise<void> {
   const user = (req as any).user;
@@ -73,108 +75,34 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
   try {
     const tradingConfig = await getTradingConfig();
 
-    // If active broker supports detailed positions, use it
-    if (tradingConfig.ACTIVE_BROKER === "coinbase") {
-      const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker;
-      if (broker.getDetailedPositions) {
-        const positions = await broker.getDetailedPositions();
-
-        // Get USD cash balance from Coinbase accounts
-        let cashBalance = 0;
-        try {
-          const cbData = await broker.getCashBalance();
-          cashBalance = cbData;
-        } catch (cashErr) {
-          logger.warn("[API] Failed to get cash balance (non-fatal)", { error: String(cashErr) });
-        }
-
-        // Compute performance metrics from Coinbase fill history
-        let performance: Record<string, unknown> = {};
-        try {
-          performance = await broker.getPerformanceMetrics();
-        } catch (perfErr) {
-          logger.warn("[API] Failed to get performance metrics (non-fatal)", { error: String(perfErr) });
-        }
-
-        res.json({ positions, cashBalance, performance });
-        return;
-      }
-    }
-
-    // Default: Alpaca positions with simulated fees
-    const config = getAlpacaConfig();
-    const [resp, ordersResp] = await Promise.all([
-      fetch(`${config.baseUrl}/v2/positions`, { headers: getHeaders() }),
-      fetch(`${config.baseUrl}/v2/orders?status=open&limit=500`, { headers: getHeaders() }),
+    const [coinbaseResult, alpacaResult] = await Promise.allSettled([
+      fetchCoinbasePositions(),
+      fetchAlpacaPositions(tradingConfig.SIMULATED_FEE_RATE),
     ]);
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      logger.error("[API] Alpaca positions fetch failed", { status: resp.status, err });
-      res.status(502).json({ error: "Failed to fetch positions" });
-      return;
-    }
+    const positions: Array<Record<string, unknown>> = [];
+    let cashBalance = 0;
+    let performance: Record<string, unknown> = {};
 
-    // Build a map of symbol -> stop_price from open stop/stop_limit orders
-    const stopPriceBySymbol = new Map<string, string>();
-    if (ordersResp.ok) {
-      const openOrders = (await ordersResp.json()) as Array<Record<string, unknown>>;
-      for (const o of openOrders) {
-        const sym = o.symbol as string;
-        const side = o.side as string;
-        const type = o.type as string;
-        if (side === "sell" && (type === "stop" || type === "stop_limit") && o.stop_price) {
-          stopPriceBySymbol.set(sym, o.stop_price as string);
-        }
+    if (coinbaseResult.status === "fulfilled" && coinbaseResult.value) {
+      for (const p of coinbaseResult.value.positions) {
+        positions.push({ ...p, broker: "coinbase" });
       }
+      cashBalance = coinbaseResult.value.cashBalance;
+      performance = coinbaseResult.value.performance;
+    } else if (coinbaseResult.status === "rejected") {
+      logger.warn("[API] Coinbase positions fetch failed", { error: String(coinbaseResult.reason) });
     }
 
-    const positions = (await resp.json()) as Array<Record<string, unknown>>;
-    const feeRate = tradingConfig.SIMULATED_FEE_RATE;
+    if (alpacaResult.status === "fulfilled" && alpacaResult.value) {
+      for (const p of alpacaResult.value) {
+        positions.push({ ...p, broker: "alpaca" });
+      }
+    } else if (alpacaResult.status === "rejected") {
+      logger.warn("[API] Alpaca positions fetch failed", { error: String(alpacaResult.reason) });
+    }
 
-    const mapped = positions.map((p) => {
-      const qty = parseFloat(p.qty as string);
-      const entryPrice = parseFloat(p.avg_entry_price as string);
-      const currentPrice = parseFloat(p.current_price as string);
-      const marketValue = parseFloat(p.market_value as string);
-      const costBasis = parseFloat(p.cost_basis as string);
-      const isCrypto = (p.asset_class as string || "").toLowerCase() === "crypto";
-
-      // Simulate exchange fees only for crypto (stocks are commission-free on Alpaca)
-      const effectiveFeeRate = isCrypto ? feeRate : 0;
-      const entryFee = costBasis * effectiveFeeRate;
-      const exitFee = marketValue * effectiveFeeRate;
-      const totalFees = entryFee + exitFee;
-
-      const adjCostBasis = costBasis + entryFee;
-      const adjUnrealizedPl = marketValue - adjCostBasis - exitFee;
-      const adjUnrealizedPlPct = adjCostBasis > 0 ? adjUnrealizedPl / adjCostBasis : 0;
-
-      const intradayPl = parseFloat((p.unrealized_intraday_pl as string) || "0");
-      const adjIntradayPl = intradayPl - exitFee;
-      const adjIntradayPlPct = marketValue > 0 ? adjIntradayPl / marketValue : 0;
-
-      return {
-        symbol: p.symbol,
-        qty: p.qty,
-        avg_entry_price: p.avg_entry_price,
-        current_price: p.current_price,
-        market_value: p.market_value,
-        cost_basis: adjCostBasis.toFixed(6),
-        unrealized_pl: adjUnrealizedPl.toFixed(6),
-        unrealized_plpc: adjUnrealizedPlPct.toFixed(6),
-        unrealized_intraday_pl: adjIntradayPl.toFixed(6),
-        unrealized_intraday_plpc: adjIntradayPlPct.toFixed(6),
-        change_today: p.change_today,
-        side: p.side,
-        asset_class: p.asset_class,
-        simulated_fees: totalFees.toFixed(6),
-        fee_rate: effectiveFeeRate,
-        ...(stopPriceBySymbol.has(p.symbol as string) && { stop_loss: stopPriceBySymbol.get(p.symbol as string) }),
-      };
-    });
-
-    res.json({ positions: mapped });
+    res.json({ positions, cashBalance, performance });
   } catch (err) {
     logger.error("[API] Positions request error", err);
     res.status(500).json({ error: "Internal server error" });
@@ -182,15 +110,132 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
 }
 
 /**
+ * Fetch Coinbase positions + cash + perf metrics. Returns null if the broker
+ * doesn't expose getDetailedPositions (shouldn't happen in current deployment).
+ */
+async function fetchCoinbasePositions(): Promise<{
+  positions: Array<Record<string, unknown>>;
+  cashBalance: number;
+  performance: Record<string, unknown>;
+} | null> {
+  const broker = getBroker("coinbase") as import("../brokers/coinbase").CoinbaseBroker;
+  if (!broker.getDetailedPositions) return null;
+
+  const positions = await broker.getDetailedPositions() as unknown as Array<Record<string, unknown>>;
+
+  let cashBalance = 0;
+  try {
+    cashBalance = await broker.getCashBalance();
+  } catch (cashErr) {
+    logger.warn("[API] Failed to get Coinbase cash balance (non-fatal)", { error: String(cashErr) });
+  }
+
+  let performance: Record<string, unknown> = {};
+  try {
+    performance = await broker.getPerformanceMetrics();
+  } catch (perfErr) {
+    logger.warn("[API] Failed to get Coinbase performance metrics (non-fatal)", { error: String(perfErr) });
+  }
+
+  return { positions, cashBalance, performance };
+}
+
+/**
+ * Fetch Alpaca positions with simulated-fees adjustment and stop_loss lookup.
+ * Returns the same per-row shape mobile already understands (simulated_fees etc.).
+ */
+async function fetchAlpacaPositions(feeRate: number): Promise<Array<Record<string, unknown>>> {
+  const config = getAlpacaConfig();
+  const [resp, ordersResp] = await Promise.all([
+    fetch(`${config.baseUrl}/v2/positions`, { headers: getHeaders() }),
+    fetch(`${config.baseUrl}/v2/orders?status=open&limit=500`, { headers: getHeaders() }),
+  ]);
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Alpaca positions HTTP ${resp.status}: ${err}`);
+  }
+
+  const stopPriceBySymbol = new Map<string, string>();
+  if (ordersResp.ok) {
+    const openOrders = (await ordersResp.json()) as Array<Record<string, unknown>>;
+    for (const o of openOrders) {
+      const sym = o.symbol as string;
+      const side = o.side as string;
+      const type = o.type as string;
+      if (side === "sell" && (type === "stop" || type === "stop_limit") && o.stop_price) {
+        stopPriceBySymbol.set(sym, o.stop_price as string);
+      }
+    }
+  }
+
+  const positions = (await resp.json()) as Array<Record<string, unknown>>;
+
+  return positions.map((p) => {
+    const marketValue = parseFloat(p.market_value as string);
+    const costBasis = parseFloat(p.cost_basis as string);
+    const isCrypto = (p.asset_class as string || "").toLowerCase() === "crypto";
+
+    // Simulate exchange fees only for crypto (stocks are commission-free on Alpaca)
+    const effectiveFeeRate = isCrypto ? feeRate : 0;
+    const entryFee = costBasis * effectiveFeeRate;
+    const exitFee = marketValue * effectiveFeeRate;
+    const totalFees = entryFee + exitFee;
+
+    const adjCostBasis = costBasis + entryFee;
+    const adjUnrealizedPl = marketValue - adjCostBasis - exitFee;
+    const adjUnrealizedPlPct = adjCostBasis > 0 ? adjUnrealizedPl / adjCostBasis : 0;
+
+    const intradayPl = parseFloat((p.unrealized_intraday_pl as string) || "0");
+    const adjIntradayPl = intradayPl - exitFee;
+    const adjIntradayPlPct = marketValue > 0 ? adjIntradayPl / marketValue : 0;
+
+    return {
+      symbol: p.symbol,
+      qty: p.qty,
+      avg_entry_price: p.avg_entry_price,
+      current_price: p.current_price,
+      market_value: p.market_value,
+      cost_basis: adjCostBasis.toFixed(6),
+      unrealized_pl: adjUnrealizedPl.toFixed(6),
+      unrealized_plpc: adjUnrealizedPlPct.toFixed(6),
+      unrealized_intraday_pl: adjIntradayPl.toFixed(6),
+      unrealized_intraday_plpc: adjIntradayPlPct.toFixed(6),
+      change_today: p.change_today,
+      side: p.side,
+      asset_class: p.asset_class,
+      simulated_fees: totalFees.toFixed(6),
+      fee_rate: effectiveFeeRate,
+      ...(stopPriceBySymbol.has(p.symbol as string) && { stop_loss: stopPriceBySymbol.get(p.symbol as string) }),
+    };
+  });
+}
+
+/**
+ * Resolve which broker currently holds an open position for `symbol`. Returns
+ * null if no broker reports a position. Probes both in parallel.
+ */
+async function resolveOwningBroker(symbol: string): Promise<"alpaca" | "coinbase" | null> {
+  const [cb, al] = await Promise.allSettled([
+    getBroker("coinbase").getPosition(symbol),
+    getBroker("alpaca").getPosition(symbol),
+  ]);
+  if (cb.status === "fulfilled" && cb.value && cb.value.qty > 0) return "coinbase";
+  if (al.status === "fulfilled" && al.value && al.value.qty > 0) return "alpaca";
+  return null;
+}
+
+/**
  * Liquidate a position by symbol (reusable, non-HTTP).
- * Delegates to the active broker's liquidatePosition method.
- * Returns the order data on success, throws on failure.
+ * Resolves the owning broker by probing both, then delegates.
  */
 export async function liquidateSymbol(symbol: string): Promise<Record<string, unknown>> {
-  const { getTradingConfig } = await import("./config");
-  const tradingConfig = await getTradingConfig();
-  const broker = getBroker(tradingConfig.ACTIVE_BROKER);
-  logger.info("[LIQUIDATE] Delegating to broker", { broker: broker.name, symbol });
+  const owning = await resolveOwningBroker(symbol);
+  if (!owning) {
+    throw new Error(`No open position found for ${symbol} on either broker`);
+  }
+  const broker = getBroker(owning);
+  logger.info("[LIQUIDATE] Delegating to broker", { broker: owning, symbol });
   return broker.liquidatePosition(symbol);
 }
 
@@ -218,13 +263,19 @@ export async function handleUpdateStopLoss(req: Request, res: Response): Promise
   }
 
   try {
-    const tradingConfig = await getTradingConfig();
-    // Always use the active broker — same as /positions endpoint.
-    const broker = getBroker(tradingConfig.ACTIVE_BROKER) as import("../brokers/coinbase").CoinbaseBroker | import("../brokers/alpaca").AlpacaBroker;
-    const resolvedBroker = tradingConfig.ACTIVE_BROKER;
-    const result = await (broker as any).updateStopLoss(symbol, stopPrice);
+    const resolvedBroker = await resolveOwningBroker(symbol);
+    if (!resolvedBroker) {
+      res.status(404).json({ error: `No open position found for ${symbol} on either broker` });
+      return;
+    }
+    const broker = getBroker(resolvedBroker);
+    if (!broker.updateStopLoss) {
+      res.status(400).json({ error: `Broker ${resolvedBroker} does not support stop-loss updates` });
+      return;
+    }
+    const result = await broker.updateStopLoss(symbol, stopPrice);
     if (!result.success) {
-      logger.error("[API] updateStopLoss broker failed", { symbol, stopPrice, message: result.message });
+      logger.error("[API] updateStopLoss broker failed", { broker: resolvedBroker, symbol, stopPrice, message: result.message });
       await getFirestore().collection("broker_errors").add({
         broker: resolvedBroker,
         action: "updateStopLoss",
@@ -237,7 +288,7 @@ export async function handleUpdateStopLoss(req: Request, res: Response): Promise
       res.status(500).json({ error: result.message });
       return;
     }
-    res.json({ status: "updated", symbol, stopPrice, orderId: result.orderId, message: result.message });
+    res.json({ status: "updated", symbol, stopPrice, broker: resolvedBroker, orderId: result.orderId, message: result.message });
   } catch (err) {
     logger.error("[API] updateStopLoss error", { symbol, error: String(err) });
     await getFirestore().collection("broker_errors").add({
