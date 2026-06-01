@@ -131,7 +131,7 @@ interface StopFillSummary {
 async function getRecentCoinbaseStopFills(cb: CoinbaseBroker, limit = RECENT_STOPS_LIMIT): Promise<StopFillSummary[]> {
   try {
     const { ok, data } = await (cb as unknown as { request: (m: string, p: string) => Promise<{ ok: boolean; data: Record<string, unknown> }> })
-      .request("GET", "/orders/historical/batch?order_status=FILLED&limit=100");
+      .request("GET", "/orders/historical/batch?order_status=FILLED&limit=250");
     if (!ok) return [];
     const orders = (data.orders as Array<Record<string, unknown>> | undefined) || [];
 
@@ -148,11 +148,42 @@ async function getRecentCoinbaseStopFills(cb: CoinbaseBroker, limit = RECENT_STO
       buysBySymbol.set(sym, arr);
     }
 
+    // Inclusive stop-fill detector — any FILLED SELL where the order configuration
+    // key contains "stop" OR the trigger_status indicates a stop fired. This catches
+    // stop_limit_stop_limit_gtc/gtd, trigger_bracket_*, and any future stop variants
+    // Coinbase introduces, without us having to enumerate them.
     const stops = orders.filter((o) => {
       if (o.side !== "SELL") return false;
-      const cfg = o.order_configuration as Record<string, unknown> | undefined;
-      return !!(cfg?.stop_limit_stop_limit_gtc || cfg?.stop_limit_stop_limit_gtd);
+      const cfg = (o.order_configuration as Record<string, unknown> | undefined) || {};
+      const hasStopCfg = Object.keys(cfg).some((k) => /stop/i.test(k));
+      const triggerStatus = String(o.trigger_status || "");
+      const stopTriggered = /STOP_TRIGGERED|TRIGGERED/i.test(triggerStatus);
+      return hasStopCfg || stopTriggered;
     }).slice(0, limit);
+
+    logger.info("[LIQUIDATOR] coinbase stop-fill scan", {
+      totalOrders: orders.length,
+      sellOrders: orders.filter(o => o.side === "SELL").length,
+      stopsFound: stops.length,
+      stopSymbols: stops.map(o => o.product_id),
+      // Surface SELL configs we did NOT classify as stops, so we can spot
+      // any new Coinbase order_configuration variants we should add.
+      unclassifiedSellCfgs: orders
+        .filter(o => {
+          if (o.side !== "SELL") return false;
+          const cfg = (o.order_configuration as Record<string, unknown> | undefined) || {};
+          const hasStopCfg = Object.keys(cfg).some((k) => /stop/i.test(k));
+          const stopTriggered = /STOP_TRIGGERED|TRIGGERED/i.test(String(o.trigger_status || ""));
+          return !hasStopCfg && !stopTriggered;
+        })
+        .slice(0, 10)
+        .map(o => ({
+          symbol: o.product_id,
+          cfgKeys: Object.keys((o.order_configuration as Record<string, unknown> | undefined) || {}),
+          triggerStatus: o.trigger_status,
+          filledAt: o.last_fill_time,
+        })),
+    });
 
     const now = Date.now();
     return stops.map((o) => {
