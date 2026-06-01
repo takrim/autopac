@@ -152,14 +152,20 @@ async function getRecentCoinbaseStopFills(cb: CoinbaseBroker, limit = RECENT_STO
     // key contains "stop" OR the trigger_status indicates a stop fired. This catches
     // stop_limit_stop_limit_gtc/gtd, trigger_bracket_*, and any future stop variants
     // Coinbase introduces, without us having to enumerate them.
-    const stops = orders.filter((o) => {
-      if (o.side !== "SELL") return false;
-      const cfg = (o.order_configuration as Record<string, unknown> | undefined) || {};
-      const hasStopCfg = Object.keys(cfg).some((k) => /stop/i.test(k));
-      const triggerStatus = String(o.trigger_status || "");
-      const stopTriggered = /STOP_TRIGGERED|TRIGGERED/i.test(triggerStatus);
-      return hasStopCfg || stopTriggered;
-    }).slice(0, limit);
+    const stops = orders
+      .filter((o) => {
+        if (o.side !== "SELL") return false;
+        const cfg = (o.order_configuration as Record<string, unknown> | undefined) || {};
+        const hasStopCfg = Object.keys(cfg).some((k) => /stop/i.test(k));
+        const triggerStatus = String(o.trigger_status || "");
+        const stopTriggered = /STOP_TRIGGERED|TRIGGERED/i.test(triggerStatus);
+        return hasStopCfg || stopTriggered;
+      })
+      // Coinbase returns orders sorted by created_time desc, but a stop order
+      // can fire long after creation. Sort by actual fill time so the newest
+      // stop-OUTS surface, not the newest stop-orders-placed.
+      .sort((a, b) => Date.parse(String(b.last_fill_time || "")) - Date.parse(String(a.last_fill_time || "")))
+      .slice(0, limit);
 
     logger.info("[LIQUIDATOR] coinbase stop-fill scan", {
       totalOrders: orders.length,
@@ -251,11 +257,16 @@ async function getRecentAlpacaStopFills(limit = RECENT_STOPS_LIMIT): Promise<Sto
       buysBySymbol.set(sym, arr);
     }
 
-    const stops = orders.filter((o) =>
-      o.side === "sell" &&
-      o.status === "filled" &&
-      (o.type === "stop" || o.type === "stop_limit")
-    ).slice(0, limit);
+    const stops = orders
+      .filter((o) =>
+        o.side === "sell" &&
+        o.status === "filled" &&
+        (o.type === "stop" || o.type === "stop_limit")
+      )
+      // Alpaca's status=closed returns by submitted_at desc; sort by filled_at
+      // so the newest stop-OUTS surface, not the newest stop-orders-placed.
+      .sort((a, b) => Date.parse(String(b.filled_at || "")) - Date.parse(String(a.filled_at || "")))
+      .slice(0, limit);
 
     const now = Date.now();
     return stops.map((o) => {
