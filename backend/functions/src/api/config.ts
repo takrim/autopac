@@ -74,7 +74,7 @@ export function getActiveBrokerSettings(config: TradingConfig): BrokerSettings {
 /**
  * Returns true if the symbol looks like a crypto pair (ends in USD/USDC/USDT).
  */
-function isCryptoSymbol(symbol: string): boolean {
+export function isCryptoSymbol(symbol: string): boolean {
   return /USD[CT]?$/i.test(symbol);
 }
 

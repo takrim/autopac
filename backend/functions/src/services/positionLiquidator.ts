@@ -22,6 +22,8 @@ import { sendTrailingStopNotification } from "./notification";
 import { logDecision } from "./decisionLog";
 import { computeRSI } from "./strategies/shared";
 import { listRecentRsiDips } from "./rsiDip";
+import { isUsStockMarketOpen } from "./marketHours";
+import { isCryptoSymbol } from "../api/config";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -393,6 +395,13 @@ export async function runPositionLiquidator(): Promise<void> {
 
       const rsi = await fetchRsi3m(broker, position.symbol);
 
+    // Stock SL updates are no-ops when the US market is closed (Alpaca will
+    // accept the order but it sits inert until next session, generating
+    // pointless cancel/replace churn each minute). Track + heartbeat normally,
+    // just skip the update call.
+    const stockSlSkip =
+      brokerName === "alpaca" && !isCryptoSymbol(position.symbol) && !isUsStockMarketOpen();
+
     // Profit-lock candidate (entry × 1.01) when PnL ≥ +2%; 0 if not applicable.
     const profitLockSL = (entry > 0 && pnlPct >= PROFIT_LOCK_TRIGGER_PCT)
       ? entry * (1 + PROFIT_LOCK_OFFSET_PCT / 100)
@@ -404,6 +413,11 @@ export async function runPositionLiquidator(): Promise<void> {
       const newSL = Math.max(trailSL, profitLockSL);
       if (existingSL > 0 && newSL <= existingSL) {
         results.push({ ...base, rsi, outcome: { kind: "trail_skipped_lower", existingSL, proposedSL: newSL } });
+        continue;
+      }
+      if (stockSlSkip) {
+        logger.info("[LIQUIDATOR] stock SL skip (market closed)", { productId, branch: "trail", proposedSL: newSL });
+        results.push({ ...base, rsi, outcome: { kind: "no_action", reason: "stock SL skipped: market closed" } });
         continue;
       }
       try {
@@ -457,6 +471,11 @@ export async function runPositionLiquidator(): Promise<void> {
         results.push({ ...base, rsi, outcome: { kind: "profit_lock_skipped_lower", existingSL, proposedSL: profitLockSL } });
         continue;
       }
+      if (stockSlSkip) {
+        logger.info("[LIQUIDATOR] stock SL skip (market closed)", { productId, branch: "profit_lock", proposedSL: profitLockSL });
+        results.push({ ...base, rsi, outcome: { kind: "no_action", reason: "stock SL skipped: market closed" } });
+        continue;
+      }
       try {
         const result = await broker.updateStopLoss!(position.symbol, profitLockSL);
         if (!result.success) {
@@ -502,6 +521,11 @@ export async function runPositionLiquidator(): Promise<void> {
     // ── Default-SL branch (RSI < 80 or unavailable, no SL set) ──────────
     if (existingSL <= 0) {
       const newSL = current * (1 - DEFAULT_SL_PCT / 100);
+      if (stockSlSkip) {
+        logger.info("[LIQUIDATOR] stock SL skip (market closed)", { productId, branch: "default", proposedSL: newSL });
+        results.push({ ...base, rsi, outcome: { kind: "no_action", reason: "stock SL skipped: market closed" } });
+        continue;
+      }
       try {
         const result = await broker.updateStopLoss!(position.symbol, newSL);
         if (!result.success) {
