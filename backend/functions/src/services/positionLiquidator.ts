@@ -112,12 +112,14 @@ interface PerPosition {
 }
 
 interface StopFillSummary {
+  broker: "coinbase" | "alpaca";
   symbol: string;
   exit: number;
   qty: number;
   entry: number | null;
   pnlUsd: number | null;
   filledAt: string;     // ISO string, "" if unknown
+  filledTs: number;     // ms epoch, Number.NEGATIVE_INFINITY if unknown
   ageMs: number;        // Number.POSITIVE_INFINITY if unknown
 }
 
@@ -126,7 +128,7 @@ interface StopFillSummary {
  * pair each with the most recent prior BUY fill on the same product to derive
  * entry price + realised USD P&L.
  */
-async function getRecentStopFillSummaries(cb: CoinbaseBroker, limit = RECENT_STOPS_LIMIT): Promise<StopFillSummary[]> {
+async function getRecentCoinbaseStopFills(cb: CoinbaseBroker, limit = RECENT_STOPS_LIMIT): Promise<StopFillSummary[]> {
   try {
     const { ok, data } = await (cb as unknown as { request: (m: string, p: string) => Promise<{ ok: boolean; data: Record<string, unknown> }> })
       .request("GET", "/orders/historical/batch?order_status=FILLED&limit=100");
@@ -167,12 +169,108 @@ async function getRecentStopFillSummaries(cb: CoinbaseBroker, limit = RECENT_STO
       const entry = chosen ? chosen.price : null;
       const pnlUsd = entry !== null && exit > 0 && qty > 0 ? (exit - entry) * qty : null;
 
-      return { symbol, exit, qty, entry, pnlUsd, filledAt, ageMs };
+      return {
+        broker: "coinbase" as const,
+        symbol,
+        exit,
+        qty,
+        entry,
+        pnlUsd,
+        filledAt,
+        filledTs: Number.isFinite(filledTs) ? filledTs : Number.NEGATIVE_INFINITY,
+        ageMs,
+      };
     });
   } catch (err) {
-    logger.warn("[LIQUIDATOR] getRecentStopFillSummaries failed", { error: String(err) });
+    logger.warn("[LIQUIDATOR] getRecentCoinbaseStopFills failed", { error: String(err) });
     return [];
   }
+}
+
+/**
+ * Fetch the most recent stop-loss fills from Alpaca (type=stop|stop_limit, side=sell)
+ * and pair each with the most recent prior BUY fill on the same symbol.
+ */
+async function getRecentAlpacaStopFills(limit = RECENT_STOPS_LIMIT): Promise<StopFillSummary[]> {
+  try {
+    const { getAlpacaConfig } = await import("../config");
+    const config = getAlpacaConfig();
+    const headers = {
+      "APCA-API-KEY-ID": config.apiKey,
+      "APCA-API-SECRET-KEY": config.apiSecret,
+      "Content-Type": "application/json",
+    };
+    const resp = await fetch(
+      `${config.baseUrl}/v2/orders?status=closed&limit=200&direction=desc`,
+      { headers }
+    );
+    if (!resp.ok) return [];
+    const orders = (await resp.json()) as Array<Record<string, unknown>>;
+
+    // Index BUY fills by symbol for entry-price lookup.
+    const buysBySymbol = new Map<string, Array<{ time: number; price: number }>>();
+    for (const o of orders) {
+      if (o.side !== "buy" || o.status !== "filled") continue;
+      const sym = String(o.symbol || "");
+      const price = parseFloat(String(o.filled_avg_price || "0"));
+      const t = Date.parse(String(o.filled_at || ""));
+      if (!sym || !(price > 0) || !Number.isFinite(t)) continue;
+      const arr = buysBySymbol.get(sym) || [];
+      arr.push({ time: t, price });
+      buysBySymbol.set(sym, arr);
+    }
+
+    const stops = orders.filter((o) =>
+      o.side === "sell" &&
+      o.status === "filled" &&
+      (o.type === "stop" || o.type === "stop_limit")
+    ).slice(0, limit);
+
+    const now = Date.now();
+    return stops.map((o) => {
+      const symbol = String(o.symbol || "");
+      const exit = parseFloat(String(o.filled_avg_price || "0"));
+      const qty = parseFloat(String(o.filled_qty || "0"));
+      const filledAt = String(o.filled_at || "");
+      const filledTs = Date.parse(filledAt);
+      const ageMs = Number.isFinite(filledTs) ? now - filledTs : Number.POSITIVE_INFINITY;
+
+      const buys = buysBySymbol.get(symbol) || [];
+      const eligible = Number.isFinite(filledTs) ? buys.filter((b) => b.time <= filledTs) : buys;
+      const chosen = (eligible.length > 0 ? eligible : buys).sort((a, b) => b.time - a.time)[0];
+      const entry = chosen ? chosen.price : null;
+      const pnlUsd = entry !== null && exit > 0 && qty > 0 ? (exit - entry) * qty : null;
+
+      return {
+        broker: "alpaca" as const,
+        symbol,
+        exit,
+        qty,
+        entry,
+        pnlUsd,
+        filledAt,
+        filledTs: Number.isFinite(filledTs) ? filledTs : Number.NEGATIVE_INFINITY,
+        ageMs,
+      };
+    });
+  } catch (err) {
+    logger.warn("[LIQUIDATOR] getRecentAlpacaStopFills failed", { error: String(err) });
+    return [];
+  }
+}
+
+/**
+ * Merge most-recent stop-fill summaries from both Coinbase and Alpaca,
+ * sorted newest-first, capped at `limit`.
+ */
+async function getRecentStopFillSummaries(cb: CoinbaseBroker, limit = RECENT_STOPS_LIMIT): Promise<StopFillSummary[]> {
+  const [cbStops, alpacaStops] = await Promise.all([
+    getRecentCoinbaseStopFills(cb, limit),
+    getRecentAlpacaStopFills(limit),
+  ]);
+  return [...cbStops, ...alpacaStops]
+    .sort((a, b) => b.filledTs - a.filledTs)
+    .slice(0, limit);
 }
 
 function formatStopFillLines(stops: StopFillSummary[]): string {
@@ -192,7 +290,7 @@ function formatStopFillLines(stops: StopFillSummary[]): string {
             ? `${Math.round(s.ageMs / 60_000)}m ago`
             : `${Math.round(s.ageMs / 3_600_000)}h ago`)
       : "";
-    lines.push(`  • ${s.symbol} entry=${entryStr} → exit=${exitStr} qty=${qtyStr} pnl=${pnlStr}${ageStr ? ` (${ageStr})` : ""}`);
+    lines.push(`  • [${s.broker}] ${s.symbol} entry=${entryStr} → exit=${exitStr} qty=${qtyStr} pnl=${pnlStr}${ageStr ? ` (${ageStr})` : ""}`);
   }
   return lines.join("\n");
 }
