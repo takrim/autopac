@@ -817,7 +817,7 @@ export async function runBurstScanner(): Promise<void> {
 
   logger.info("[BURST] Scored candidates", { count: candidates.length });
 
-  const MAX_OPEN_POSITIONS = 6;
+  const MAX_OPEN_POSITIONS = 20;
 
   if (candidates.length === 0) {
     logger.info("[BURST] No qualifying candidates this run");
