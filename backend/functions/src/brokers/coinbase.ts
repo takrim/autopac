@@ -1200,7 +1200,7 @@ export class CoinbaseBroker implements IBroker {
    * USD-quoted only — USDC pairs are duplicates of USD pairs (e.g. BTC-USDC
    * vs BTC-USD) and would crowd out distinct symbols from the universe.
    * Filters disabled / non-online products and any with price <= 0. Used by
-   * the EMA pullback scanner to build its symbol universe each tick.
+   * the symbol universe for scanners and screeners.
    */
   async getTopByVolume(limit = 30): Promise<Array<{
     productId: string;

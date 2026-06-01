@@ -568,7 +568,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
     if (lower === "/run" || lower.startsWith("/run ")) {
       const parts = text.trim().split(/\s+/);
       const strategyId = parts[1]?.toLowerCase() || undefined;
-      // 3rd word is optional symbol, e.g. /run emapullback ETH-USD or ETHUSD
+      // 3rd word is optional symbol, e.g. /run scalpx ETH-USD or ETHUSD
       const symbol = parts[2]?.toUpperCase() || undefined;
       await handleRunCommand(chatId, strategyId, symbol).catch((err) =>
         logger.error("[TG_WEBHOOK] handleRunCommand error", { error: String(err) })
@@ -859,7 +859,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "  Examples:",
         "    /run",
         "    /run scalpx",
-        "    /run emapullback ETH-USD",
+        "    /run scalpx ETH-USD",
         "",
         "*/cgbacktest* <symbol> [Nd | from=YYYY-MM-DD [to=YYYY-MM-DD]] \"<expr>\" [tp=N] [sl=N] [maxhold=N]",
         "  CoinGecko-driven crypto filter backtest.",
@@ -876,7 +876,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "",
         "*/strategy* <id>",
         "  Show detailed description and parameters for a strategy.",
-        "  Example: /strategy emapullback",
+        "  Example: /strategy scalpx",
         "",
         "━━━ ℹ️ General ━━━",
         "",
