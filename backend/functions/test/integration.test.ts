@@ -129,9 +129,13 @@ jest.mock("../src/config", () => ({
     DEFAULT_ORDER_TYPE: "market",
     MAX_DAILY_TRADES: 20,
     MAX_POSITION_VALUE: 50000,
-    ACTIVE_BROKER: "mock",
-    PAPER_TRADING: true,
+    ACTIVE_BROKER: "alpaca",
   },
+  getAlpacaConfig: () => ({
+    apiKey: "TEST_KEY",
+    apiSecret: "TEST_SECRET",
+    baseUrl: "https://paper-api.alpaca.markets",
+  }),
 }));
 
 // Import after mocks
@@ -156,9 +160,40 @@ function mockRes(): any {
 }
 
 describe("Integration: Signal → Approve → Order Flow", () => {
+  const originalFetch = global.fetch;
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockAdd.mockResolvedValue({ id: "signal-123" });
+
+    // Generic Alpaca fetch mock: GETs return empty arrays/objects, POSTs return a filled order.
+    (global as any).fetch = jest.fn().mockImplementation(async (url: string, init?: any) => {
+      const method = (init?.method || "GET").toUpperCase();
+      if (method === "POST" && /\/v2\/orders\b/.test(url)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "ALP-TEST-1",
+            status: "accepted",
+            symbol: "AAPL",
+            filled_avg_price: "212.45",
+          }),
+          text: async () => "",
+        };
+      }
+      // Default GET: open orders list, positions, etc.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+        text: async () => "[]",
+      };
+    });
+  });
+
+  afterAll(() => {
+    (global as any).fetch = originalFetch;
   });
 
   test("Step 1: Webhook receives and stores a valid signal", async () => {

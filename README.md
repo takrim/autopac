@@ -36,7 +36,7 @@ TradingView Alert
 | Auth           | Firebase Authentication              |
 | Notifications  | Firebase Cloud Messaging (FCM)       |
 | Mobile App     | React Native (Expo)                  |
-| Broker         | Mock (default) / Alpaca              |
+| Broker         | Alpaca / Coinbase                    |
 
 ## Project Structure
 
@@ -63,8 +63,8 @@ autopac/
 │   │   │   └── brokers/
 │   │   │       ├── interface.ts      # Broker interface
 │   │   │       ├── index.ts          # Broker factory
-│   │   │       ├── mock.ts           # Mock broker
-│   │   │       └── alpaca.ts         # Alpaca broker
+│   │   │       ├── alpaca.ts         # Alpaca broker
+│   │   │       └── coinbase.ts       # Coinbase broker
 │   │   ├── test/
 │   │   │   ├── webhook.test.ts       # Webhook validation tests
 │   │   │   ├── decision.test.ts      # Decision logic tests
@@ -233,7 +233,7 @@ curl -X POST https://us-central1-YOUR_PROJECT.cloudfunctions.net/webhook/trading
 1. Send webhook (curl above)
 2. Open mobile app → see signal in inbox
 3. Tap signal → view details
-4. Tap "Approve Trade" → order is placed via mock broker
+4. Tap "Approve Trade" → order is placed via the active broker (Alpaca/Coinbase)
 5. Check Orders tab → see executed order
 
 ### Test Against Local Emulators
@@ -329,8 +329,7 @@ Key settings in `backend/functions/src/config.ts`:
 | `MAX_SIGNAL_AGE_SECONDS` | 300    | Max signal age (5 min)           |
 | `MAX_DAILY_TRADES`      | 20      | Daily trade limit                |
 | `MAX_POSITION_VALUE`    | 50000   | Max single position ($)          |
-| `ACTIVE_BROKER`         | mock    | Broker to use (mock/alpaca)      |
-| `PAPER_TRADING`         | true    | Paper trading mode               |
+| `ACTIVE_BROKER`         | alpaca  | Broker to use (alpaca/coinbase)  |
 
 ## Extending
 

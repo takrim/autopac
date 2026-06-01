@@ -1,4 +1,4 @@
-import { MockBroker } from "../src/brokers/mock";
+import { AlpacaBroker } from "../src/brokers/alpaca";
 
 // Mock firebase-functions logger
 jest.mock("firebase-functions/v2", () => ({
@@ -9,14 +9,65 @@ jest.mock("firebase-functions/v2", () => ({
   },
 }));
 
-describe("MockBroker", () => {
-  const broker = new MockBroker();
+// firebase-admin/firestore is referenced via getFirestore() inside AlpacaBroker.placeOrder
+jest.mock("firebase-admin/firestore", () => ({
+  getFirestore: () => ({
+    collection: () => ({ add: jest.fn().mockResolvedValue({ id: "err-1" }) }),
+  }),
+  FieldValue: { serverTimestamp: () => new Date().toISOString() },
+}));
 
-  test("has name 'mock'", () => {
-    expect(broker.name).toBe("mock");
+// Stub Alpaca credentials so AlpacaBroker doesn't bail at the auth check.
+jest.mock("../src/config", () => ({
+  CONFIG: { DEFAULT_ORDER_TYPE: "market" },
+  getAlpacaConfig: () => ({
+    apiKey: "TEST_KEY",
+    apiSecret: "TEST_SECRET",
+    baseUrl: "https://paper-api.alpaca.markets",
+  }),
+}));
+
+describe("AlpacaBroker", () => {
+  const broker = new AlpacaBroker();
+  const fetchMock = jest.fn();
+  const originalFetch = global.fetch;
+
+  beforeAll(() => {
+    (global as any).fetch = fetchMock;
   });
 
-  test("placeOrder returns a result", async () => {
+  afterAll(() => {
+    (global as any).fetch = originalFetch;
+  });
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+  });
+
+  test("has name 'alpaca'", () => {
+    expect(broker.name).toBe("alpaca");
+  });
+
+  test("placeOrder returns success on 200 response", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: any) => {
+      const method = (init?.method || "GET").toUpperCase();
+      if (method === "POST" && /\/v2\/orders\b/.test(url)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "ALP-123",
+            status: "accepted",
+            symbol: "AAPL",
+            filled_avg_price: "212.45",
+          }),
+          text: async () => "",
+        };
+      }
+      // GET positions / open orders → return empty
+      return { ok: true, status: 200, json: async () => [], text: async () => "[]" };
+    });
+
     const result = await broker.placeOrder({
       symbol: "AAPL",
       side: "BUY",
@@ -24,36 +75,38 @@ describe("MockBroker", () => {
       orderType: "market",
     });
 
-    expect(result).toBeDefined();
-    expect(typeof result.success).toBe("boolean");
-    expect(typeof result.orderId).toBe("string");
-    expect(result.status).toBeDefined();
-
-    if (result.success) {
-      expect(result.orderId).toMatch(/^MOCK-/);
-      expect(result.status).toBe("FILLED");
-    }
+    expect(result.success).toBe(true);
+    expect(result.orderId).toBe("ALP-123");
+    expect(typeof result.status).toBe("string");
   });
 
-  test("placeOrder handles stop loss / take profit", async () => {
-    const result = await broker.placeOrder({
-      symbol: "TSLA",
-      side: "SELL",
-      quantity: 5,
-      orderType: "market",
-      stopLoss: 140.0,
-      takeProfit: 160.0,
+  test("placeOrder returns failure on non-OK response", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: any) => {
+      const method = (init?.method || "GET").toUpperCase();
+      if (method === "POST" && /\/v2\/orders\b/.test(url)) {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({ message: "insufficient buying power" }),
+          text: async () => "insufficient buying power",
+        };
+      }
+      return { ok: true, status: 200, json: async () => [], text: async () => "[]" };
     });
 
-    expect(result).toBeDefined();
-    expect(result.raw?.broker).toBe("mock");
+    const result = await broker.placeOrder({
+      symbol: "TSLA",
+      side: "BUY",
+      quantity: 5,
+      orderType: "market",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.status).toBe("FAILED");
   });
 });
 
 describe("Decision Logic", () => {
-  // These tests validate the core decision logic concepts
-  // The actual integration with Firestore is tested in integration tests
-
   test("valid decision actions", () => {
     const validActions = ["APPROVE", "REJECT"];
     expect(validActions).toContain("APPROVE");
@@ -70,16 +123,11 @@ describe("Decision Logic", () => {
       FAILED: [],
     };
 
-    // PENDING can only transition to APPROVED or REJECTED
     expect(validTransitions["PENDING"]).toContain("APPROVED");
     expect(validTransitions["PENDING"]).toContain("REJECTED");
     expect(validTransitions["PENDING"]).not.toContain("EXECUTED");
-
-    // APPROVED can only transition to EXECUTED or FAILED
     expect(validTransitions["APPROVED"]).toContain("EXECUTED");
     expect(validTransitions["APPROVED"]).toContain("FAILED");
-
-    // Terminal states have no transitions
     expect(validTransitions["REJECTED"]).toHaveLength(0);
     expect(validTransitions["EXECUTED"]).toHaveLength(0);
   });

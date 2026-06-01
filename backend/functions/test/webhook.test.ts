@@ -32,8 +32,7 @@ jest.mock("../src/config", () => ({
     DEFAULT_ORDER_TYPE: "market",
     MAX_DAILY_TRADES: 20,
     MAX_POSITION_VALUE: 50000,
-    ACTIVE_BROKER: "mock",
-    PAPER_TRADING: true,
+    ACTIVE_BROKER: "alpaca",
   },
 }));
 

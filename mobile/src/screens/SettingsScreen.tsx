@@ -147,7 +147,7 @@ export default function SettingsScreen() {
               <Text style={[styles.modeOptionText, config.ACTIVE_BROKER !== "coinbase" && styles.modeOptionTextActive]}>
                 Stocks
               </Text>
-              <Text style={styles.modeOptionSub}>Alpaca Paper</Text>
+              <Text style={styles.modeOptionSub}>Alpaca</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeOption, config.ACTIVE_BROKER === "coinbase" && styles.modeOptionActive]}
@@ -210,17 +210,6 @@ export default function SettingsScreen() {
             <View style={styles.row}>
               <Text style={styles.label}>Day Trades</Text>
               <Text style={styles.value}>{account.daytrade_count ?? "—"}</Text>
-            </View>
-          </>
-        )}
-        {ALPACA_ONLY_BROKERS.has(config?.ACTIVE_BROKER || "alpaca") && (
-          <>
-            <View style={styles.divider} />
-            <View style={styles.row}>
-              <Text style={styles.label}>Paper Trading</Text>
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>ON</Text>
-              </View>
             </View>
           </>
         )}
@@ -351,7 +340,7 @@ export default function SettingsScreen() {
             <View style={styles.row}>
               <Text style={styles.label}>Broker</Text>
               <View style={styles.segmentGroup}>
-                {(["alpaca", "coinbase", "mock"] as const).map((b) => (
+                {(["alpaca", "coinbase"] as const).map((b) => (
                   <TouchableOpacity
                     key={b}
                     style={[styles.segment, config.ACTIVE_BROKER === b && styles.segmentActive]}

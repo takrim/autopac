@@ -45,14 +45,14 @@ AutoPac is a **semi-automated trading system** where:
 | Trade approval API         | Done   | `POST /trade/approve` — auth required, Firestore transaction, risk checks |
 | Signal/Order list APIs     | Done   | `GET /signals`, `GET /signals/:id`, `GET /orders` |
 | FCM token registration     | Done   | `POST /fcm-token` |
-| Broker abstraction layer   | Done   | `IBroker` interface → `MockBroker`, `AlpacaBroker` |
+| Broker abstraction layer   | Done   | `IBroker` interface → `AlpacaBroker`, `CoinbaseBroker` |
 | Push notification service  | Done   | Send FCM on new signal, auto-cleanup invalid tokens |
 | Audit trail                | Done   | Logs all actions to `audit` collection |
 | Risk checks                | Done   | Daily trade limit, position value cap, market hours check |
 | Middleware                 | Done   | Firebase Auth verification, rate limiting, Helmet |
 | Firestore security rules   | Done   | No direct client writes; reads require auth |
 | Unit tests (webhook)       | Done   | 16 tests — payload validation, secret, timing, normalization |
-| Unit tests (decision)      | Done   | 5 tests — mock broker, state transition logic |
+| Unit tests (decision)      | Done   | broker placeOrder via fetch mock, state transition logic |
 | Integration tests          | Done   | 5 tests — full webhook → approve → order flow |
 | Mobile: Login screen       | Done   | Email/password, sign up toggle, error handling |
 | Mobile: Signal Inbox       | Done   | Filterable list, pull-to-refresh |
@@ -110,7 +110,7 @@ autopac/
 │       │   │   └── alpaca.ts            # GET /account, /positions, /portfolio-history — Alpaca proxy
 │       │   ├── brokers/
 │       │   │   ├── interface.ts         # IBroker interface
-│       │   │   ├── mock.ts              # MockBroker (testing / paper trading)
+│       │   │   ├── alpaca.ts            # AlpacaBroker (live/paper via ALPACA_BASE_URL)
 │       │   │   ├── alpaca.ts            # AlpacaBroker (real, uses fetch)
 │       │   │   └── index.ts             # getBroker() factory
 │       │   ├── services/
@@ -205,7 +205,7 @@ Test Suites: 3 passed, 3 total
 Tests:       28 passed, 28 total
 
 webhook.test.ts    — 16 tests (payload validation, secret, timing, normalization)
-decision.test.ts   —  5 tests (mock broker, state transitions)
+decision.test.ts   — broker placeOrder (fetch-mocked), state transitions
 integration.test.ts —  5 tests (webhook → approve → order flow, rejection, auth check)
 ```
 
@@ -216,8 +216,8 @@ integration.test.ts —  5 tests (webhook → approve → order flow, rejection,
 - **Single-user MVP** — no userId scoping on signals/orders (all belong to the one user)
 - **Fixed trade quantity** — configurable in `config.ts` (`DEFAULT_TRADE_QUANTITY = 1`)
 - **Market orders only** — `DEFAULT_ORDER_TYPE = "market"`
-- **Mock broker by default** — set `ACTIVE_BROKER=alpaca` for real trading
-- **Paper trading on** — `PAPER_TRADING=true` by default
+- **Alpaca broker default** — `ACTIVE_BROKER=alpaca`; switch to `coinbase` for crypto-only flows
+- **Paper vs live via `ALPACA_BASE_URL`** — paper: `https://paper-api.alpaca.markets`, live: `https://api.alpaca.markets`
 - **Express apps** — Two separate Express apps exported as Cloud Functions: `webhook` (public, secret-validated) and `api` (auth-required)
 
 ---

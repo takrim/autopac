@@ -12,8 +12,7 @@ export interface BrokerSettings {
 
 export interface TradingConfig {
   AUTO_APPROVE: boolean;
-  PAPER_TRADING: boolean;
-  ACTIVE_BROKER: "mock" | "alpaca" | "coinbase";
+  ACTIVE_BROKER: "alpaca" | "coinbase";
   TRADE_VALUE_USD: number;
   STOP_LOSS_PCT: number;
   TAKE_PROFIT_PCT: number;
@@ -28,7 +27,6 @@ export interface TradingConfig {
 
 const DEFAULTS: TradingConfig = {
   AUTO_APPROVE: false,
-  PAPER_TRADING: true,
   ACTIVE_BROKER: "alpaca",
   TRADE_VALUE_USD: 1000,
   STOP_LOSS_PCT: 0.5,
@@ -42,7 +40,6 @@ const DEFAULTS: TradingConfig = {
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 1000, allowedSymbols: [] },
-    mock: { tradeValueUsd: 1000, allowedSymbols: [] },
   },
 };
 
@@ -94,7 +91,7 @@ function isCryptoSymbol(symbol: string): boolean {
 export function getBrokerForSymbol(
   config: TradingConfig,
   symbol: string
-): "mock" | "alpaca" | "coinbase" | null {
+): "alpaca" | "coinbase" | null {
   const alpacaSymbols = config.brokerSettings?.alpaca?.allowedSymbols || [];
   const coinbaseSymbols = config.brokerSettings?.coinbase?.allowedSymbols || [];
 
@@ -148,7 +145,6 @@ export async function handleGetConfig(req: Request, res: Response): Promise<void
 
 const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "AUTO_APPROVE",
-  "PAPER_TRADING",
   "ACTIVE_BROKER",
   "TRADE_VALUE_USD",
   "STOP_LOSS_PCT",

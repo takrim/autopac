@@ -187,7 +187,7 @@ export async function executeOrder(
 
   // Place order via broker — use the broker stamped on the signal, not ACTIVE_BROKER
   const tradingConfig = await getTradingConfig();
-  const resolvedBroker = (signal.broker as "mock" | "alpaca" | "coinbase") || tradingConfig.ACTIVE_BROKER;
+  const resolvedBroker = (signal.broker as "alpaca" | "coinbase") || tradingConfig.ACTIVE_BROKER;
   const broker = getBroker(resolvedBroker);
   const brokerSettings = getBrokerSettings(tradingConfig, resolvedBroker);
   const tradeValueUsd = brokerSettings.tradeValueUsd;

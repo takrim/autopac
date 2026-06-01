@@ -270,7 +270,7 @@ export default function TrendingScreen() {
       {/* Mode badge */}
       <View style={styles.modeBadge}>
         <Text style={styles.modeBadgeText}>
-          {activeBroker === "coinbase" ? "🪙 Crypto · Coinbase" : "📈 Stocks · Alpaca Paper"}
+          {activeBroker === "coinbase" ? "🪙 Crypto · Coinbase" : "📈 Stocks · Alpaca"}
         </Text>
       </View>
 

@@ -277,8 +277,7 @@ export interface BrokerSettings {
 
 export interface TradingConfig {
   AUTO_APPROVE: boolean;
-  PAPER_TRADING: boolean;
-  ACTIVE_BROKER: "mock" | "alpaca" | "coinbase";
+  ACTIVE_BROKER: "alpaca" | "coinbase";
   TRADE_VALUE_USD: number;
   STOP_LOSS_PCT: number;
   TAKE_PROFIT_PCT: number;

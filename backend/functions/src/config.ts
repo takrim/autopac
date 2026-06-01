@@ -32,16 +32,13 @@ export const CONFIG = {
   ALLOWED_ORDER_COMMENTS: ["LE"] as string[],
 
   // Broker
-  ACTIVE_BROKER: (process.env.ACTIVE_BROKER || "mock") as "mock" | "alpaca" | "coinbase",
+  ACTIVE_BROKER: (process.env.ACTIVE_BROKER || "alpaca") as "alpaca" | "coinbase",
 
   // Order pyramiding: allow multiple buys on the same symbol
   ORDER_PYRAMID: process.env.ORDER_PYRAMID === "true",
 
   // Auto-approve: skip manual approval and execute immediately
   AUTO_APPROVE: process.env.AUTO_APPROVE === "true",
-
-  // Paper trading mode
-  PAPER_TRADING: process.env.PAPER_TRADING !== "false",
 
   // Simulated fee rate per side (entry + exit) to approximate real exchange costs.
   // Default matches Coinbase Advanced taker fee on the current tier (0.5%).

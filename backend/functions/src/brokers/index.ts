@@ -1,6 +1,5 @@
 import { CONFIG } from "../config";
 import { IBroker } from "./interface";
-import { MockBroker } from "./mock";
 import { AlpacaBroker } from "./alpaca";
 import { CoinbaseBroker } from "./coinbase";
 
@@ -14,8 +13,7 @@ export function getBroker(broker?: string): IBroker {
       return new AlpacaBroker();
     case "coinbase":
       return new CoinbaseBroker();
-    case "mock":
     default:
-      return new MockBroker();
+      throw new Error(`Unknown broker: ${broker || CONFIG.ACTIVE_BROKER}`);
   }
 }

@@ -654,7 +654,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
 
   // --- Resolve broker for this symbol (independent of ACTIVE_BROKER) ---
   let tradingConfig: TradingConfig;
-  let bulltrendBroker: "mock" | "alpaca" | "coinbase";
+  let bulltrendBroker: "alpaca" | "coinbase";
   try {
     tradingConfig = await getTradingConfig();
     const resolved = getBrokerForSymbol(tradingConfig, symbol);
@@ -968,7 +968,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
   }
 
   // --- Resolve broker / allowlist check ---
-  let beartrendBroker: "mock" | "alpaca" | "coinbase";
+  let beartrendBroker: "alpaca" | "coinbase";
   try {
     const configForFilter = await getTradingConfig();
     const resolved = getBrokerForSymbol(configForFilter, symbol);
