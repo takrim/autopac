@@ -15,8 +15,6 @@ import { signOut } from "../services/auth";
 import { useAuth } from "../context/AuthContext";
 import { fetchAccount, AlpacaAccount, fetchConfig, updateConfig, TradingConfig } from "../services/api";
 
-const ALPACA_ONLY_BROKERS = new Set(["alpaca"]);
-
 export default function SettingsScreen() {
   const { user } = useAuth();
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -53,14 +51,15 @@ export default function SettingsScreen() {
     }
   };
 
-  // Get active broker's settings for display
-  const activeBroker = config?.ACTIVE_BROKER || "alpaca";
-  const brokerTradeValue = config?.brokerSettings?.[activeBroker]?.tradeValueUsd ?? config?.TRADE_VALUE_USD ?? 1000;
+  // Trade value is configured per broker. Both stocks (alpaca) and crypto
+  // (coinbase) routes run simultaneously, so each shows its own size.
+  const stocksTradeValue = config?.brokerSettings?.alpaca?.tradeValueUsd ?? config?.TRADE_VALUE_USD ?? 1000;
+  const cryptoTradeValue = config?.brokerSettings?.coinbase?.tradeValueUsd ?? config?.TRADE_VALUE_USD ?? 1000;
 
-  const handleBrokerTradeValueEdit = (current: number) => {
+  const handleBrokerTradeValueEdit = (broker: "alpaca" | "coinbase", current: number) => {
     Alert.prompt(
       "Set Trade Value (USD)",
-      `Enter a value between 1 and 100000 for ${activeBroker.toUpperCase()}`,
+      `Enter a value between 1 and 100000 for ${broker.toUpperCase()}`,
       (value) => {
         const num = parseFloat(value);
         if (isNaN(num) || num < 1 || num > 100000) {
@@ -69,8 +68,8 @@ export default function SettingsScreen() {
         }
         const updatedBrokerSettings = {
           ...config?.brokerSettings,
-          [activeBroker]: {
-            ...config?.brokerSettings?.[activeBroker],
+          [broker]: {
+            ...config?.brokerSettings?.[broker],
             tradeValueUsd: num,
           },
         };
@@ -129,41 +128,6 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      {/* Trading Mode */}
-      <Text style={[styles.sectionHeader, { marginTop: 8 }]}>TRADING MODE</Text>
-      {configLoading ? (
-        <View style={[styles.section, { paddingVertical: 20, alignItems: "center" }]}>
-          <ActivityIndicator color="#e94560" />
-        </View>
-      ) : config ? (
-        <View style={[styles.section, { padding: 8 }]}>
-          <View style={styles.modeToggle}>
-            <TouchableOpacity
-              style={[styles.modeOption, config.ACTIVE_BROKER !== "coinbase" && styles.modeOptionActive]}
-              onPress={() => saveConfig({ ACTIVE_BROKER: "alpaca" })}
-              disabled={saving}
-            >
-              <Text style={styles.modeOptionEmoji}>📈</Text>
-              <Text style={[styles.modeOptionText, config.ACTIVE_BROKER !== "coinbase" && styles.modeOptionTextActive]}>
-                Stocks
-              </Text>
-              <Text style={styles.modeOptionSub}>Alpaca</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modeOption, config.ACTIVE_BROKER === "coinbase" && styles.modeOptionActive]}
-              onPress={() => saveConfig({ ACTIVE_BROKER: "coinbase" })}
-              disabled={saving}
-            >
-              <Text style={styles.modeOptionEmoji}>🪙</Text>
-              <Text style={[styles.modeOptionText, config.ACTIVE_BROKER === "coinbase" && styles.modeOptionTextActive]}>
-                Crypto
-              </Text>
-              <Text style={styles.modeOptionSub}>Coinbase Live</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      ) : null}
-
       {/* Account Info */}
       <Text style={styles.sectionHeader}>ACCOUNT</Text>
       <View style={styles.section}>
@@ -199,7 +163,7 @@ export default function SettingsScreen() {
             </View>
           )}
         </View>
-        {account && ALPACA_ONLY_BROKERS.has(config?.ACTIVE_BROKER || "alpaca") && (
+        {account && (
           <>
             <View style={styles.divider} />
             <View style={styles.row}>
@@ -270,11 +234,20 @@ export default function SettingsScreen() {
           <View style={styles.section}>
             <TouchableOpacity
               style={styles.row}
-              onPress={() => handleBrokerTradeValueEdit(brokerTradeValue)}
+              onPress={() => handleBrokerTradeValueEdit("alpaca", stocksTradeValue)}
               disabled={saving}
             >
-              <Text style={styles.label}>Trade Value ({activeBroker.toUpperCase()})</Text>
-              <Text style={styles.valueEdit}>${brokerTradeValue.toLocaleString()}</Text>
+              <Text style={styles.label}>Trade Value (Stocks)</Text>
+              <Text style={styles.valueEdit}>${stocksTradeValue.toLocaleString()}</Text>
+            </TouchableOpacity>
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleBrokerTradeValueEdit("coinbase", cryptoTradeValue)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Trade Value (Crypto)</Text>
+              <Text style={styles.valueEdit}>${cryptoTradeValue.toLocaleString()}</Text>
             </TouchableOpacity>
             <View style={styles.divider} />
             <TouchableOpacity
@@ -303,19 +276,15 @@ export default function SettingsScreen() {
               <Text style={styles.label}>Max Daily Trades</Text>
               <Text style={styles.valueEdit}>{config.MAX_DAILY_TRADES}</Text>
             </TouchableOpacity>
-            {ALPACA_ONLY_BROKERS.has(config.ACTIVE_BROKER) && (
-              <>
-                <View style={styles.divider} />
-                <TouchableOpacity
-                  style={styles.row}
-                  onPress={() => handleNumberEdit("SIMULATED_FEE_RATE", "Fee Rate (e.g. 0.005 = 0.5% taker)", config.SIMULATED_FEE_RATE, 0, 0.1, 4)}
-                  disabled={saving}
-                >
-                  <Text style={styles.label}>Simulated Fee Rate</Text>
-                  <Text style={styles.valueEdit}>{(config.SIMULATED_FEE_RATE * 100).toFixed(4)}%</Text>
-                </TouchableOpacity>
-              </>
-            )}
+            <View style={styles.divider} />
+            <TouchableOpacity
+              style={styles.row}
+              onPress={() => handleNumberEdit("SIMULATED_FEE_RATE", "Fee Rate (e.g. 0.005 = 0.5% taker)", config.SIMULATED_FEE_RATE, 0, 0.1, 4)}
+              disabled={saving}
+            >
+              <Text style={styles.label}>Simulated Fee Rate</Text>
+              <Text style={styles.valueEdit}>{(config.SIMULATED_FEE_RATE * 100).toFixed(4)}%</Text>
+            </TouchableOpacity>
           </View>
 
           <View style={styles.section}>
@@ -331,24 +300,6 @@ export default function SettingsScreen() {
                   >
                     <Text style={[styles.segmentText, config.ALLOWED_DIRECTIONS === d && styles.segmentTextActive]}>
                       {d}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.row}>
-              <Text style={styles.label}>Broker</Text>
-              <View style={styles.segmentGroup}>
-                {(["alpaca", "coinbase"] as const).map((b) => (
-                  <TouchableOpacity
-                    key={b}
-                    style={[styles.segment, config.ACTIVE_BROKER === b && styles.segmentActive]}
-                    onPress={() => saveConfig({ ACTIVE_BROKER: b })}
-                    disabled={saving}
-                  >
-                    <Text style={[styles.segmentText, config.ACTIVE_BROKER === b && styles.segmentTextActive]}>
-                      {b.toUpperCase()}
                     </Text>
                   </TouchableOpacity>
                 ))}

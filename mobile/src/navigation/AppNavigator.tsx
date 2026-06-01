@@ -77,6 +77,7 @@ function MainTabs() {
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>📈</Text>,
         }}
       />
+      {/* Trending tab temporarily hidden — keep the screen + import for later.
       <Tab.Screen
         name="TrendingTab"
         component={TrendingScreen}
@@ -87,6 +88,7 @@ function MainTabs() {
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>🔥</Text>,
         }}
       />
+      */}
       <Tab.Screen
         name="SignalsTab"
         component={SignalsStack}
