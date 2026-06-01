@@ -55,7 +55,20 @@ export class AlpacaBroker implements IBroker {
         `${config.baseUrl}/v2/assets/${encodeURIComponent(alpacaSymbol)}`,
         { headers: this.getHeaders() }
       );
-      const exists = resp.ok;
+      let exists = false;
+      if (resp.ok) {
+        try {
+          const data = await resp.json() as { tradable?: boolean; status?: string };
+          exists = data.tradable === true && data.status === "active";
+          if (!exists) {
+            logger.info("[ALPACA] assetExists: asset present but not tradable/active", {
+              symbol: alpacaSymbol, tradable: data.tradable, status: data.status,
+            });
+          }
+        } catch {
+          exists = false;
+        }
+      }
       AlpacaBroker.assetCache.set(cacheKey, {
         exists,
         expiresAt: Date.now() + AlpacaBroker.ASSET_TTL_MS,
