@@ -48,6 +48,8 @@ export interface Signal {
   signalTime: string;
   status: "PENDING" | "APPROVED" | "REJECTED" | "EXECUTED" | "FAILED";
   statusMessage?: string;
+  broker?: "alpaca" | "coinbase";
+  exchange?: "alpaca" | "coinbase";
   rsi?: number;
   rsiTrend?: string;
   rsiConfidence?: string;
@@ -170,6 +172,7 @@ export interface Position {
   change_today: string;
   side: string;
   asset_class: string;
+  broker?: "alpaca" | "coinbase";
   simulated_fees?: string;
   actual_fees?: string;
   fee_rate?: number;

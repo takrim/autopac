@@ -14,10 +14,12 @@ import { Swipeable } from "react-native-gesture-handler";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Position, fetchPositions, fetchConfig, liquidatePosition, updateStopLoss } from "../services/api";
 
+const MAX_OPEN_POSITIONS = 20;
+const MAX_OPEN_POSITIONS_WARN_AT = 18;
+
 export default function PositionsScreen() {
   const navigation = useNavigation<any>();
   const [positions, setPositions] = useState<Position[]>([]);
-  const [activeBroker, setActiveBroker] = useState<string>("alpaca");
   const [stopLossPct, setStopLossPct] = useState<number>(0.5);
   const [showAll, setShowAll] = useState(false);
   const [sortKey, setSortKey] = useState<"latest" | "pnl" | "name">("latest");
@@ -43,7 +45,6 @@ export default function PositionsScreen() {
       setError(null);
       const [data, cfg] = await Promise.all([fetchPositions(), fetchConfig()]);
       setPositions(data);
-      setActiveBroker(cfg.ACTIVE_BROKER);
       setStopLossPct(cfg.STOP_LOSS_PCT ?? 0.5);
     } catch (err: any) {
       setError(err.message || "Failed to load positions");
@@ -138,12 +139,11 @@ export default function PositionsScreen() {
 
       <FlatList
         data={sortedPositions}
-        keyExtractor={(item) => item.symbol}
+        keyExtractor={(item) => `${item.broker ?? "unk"}:${item.symbol}`}
         renderItem={({ item }) => (
           <PositionCard
             position={item}
             onLiquidated={loadPositions}
-            isCoinbase={activeBroker === "coinbase"}
             stopLossPct={stopLossPct}
             onTap={() => navigation.navigate("PositionDetail", { position: item })}
           />
@@ -159,16 +159,25 @@ export default function PositionsScreen() {
           />
         }
         ListHeaderComponent={
-          hasLosers ? (
-            <TouchableOpacity
-              style={styles.showAllToggle}
-              onPress={() => setShowAll(v => !v)}
-            >
-              <Text style={styles.showAllToggleText}>
-                {showAll ? "🏆 Winning only" : `📋 Show all (${positions.length})`}
-              </Text>
-            </TouchableOpacity>
-          ) : null
+          <>
+            {positions.length >= MAX_OPEN_POSITIONS_WARN_AT && (
+              <View style={styles.capBanner}>
+                <Text style={styles.capBannerText}>
+                  ⚠️ {positions.length}/{MAX_OPEN_POSITIONS} positions open
+                </Text>
+              </View>
+            )}
+            {hasLosers ? (
+              <TouchableOpacity
+                style={styles.showAllToggle}
+                onPress={() => setShowAll(v => !v)}
+              >
+                <Text style={styles.showAllToggleText}>
+                  {showAll ? "🏆 Winning only" : `📋 Show all (${positions.length})`}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </>
         }
         ListEmptyComponent={
           <View style={styles.center}>
@@ -181,10 +190,11 @@ export default function PositionsScreen() {
   );
 }
 
-function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5, onTap }: { position: Position; onLiquidated: () => void; isCoinbase?: boolean; stopLossPct?: number; onTap?: () => void }) {
+function PositionCard({ position, onLiquidated, stopLossPct = 0.5, onTap }: { position: Position; onLiquidated: () => void; stopLossPct?: number; onTap?: () => void }) {
   const swipeableRef = useRef<Swipeable>(null);
   const [liquidating, setLiquidating] = useState(false);
   const [movingSloss, setMovingSloss] = useState(false);
+  const broker = position.broker;
   const pl = parseFloat(position.unrealized_pl || "0");
   const plPct = parseFloat(position.unrealized_plpc || "0") * 100;
   const intradayPl = parseFloat(position.unrealized_intraday_pl || "0");
@@ -202,7 +212,8 @@ function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5, o
   // - if profit% > 2%: trail to 1% below current price
   // - if profit > 0% but ≤ 2%: move to break-even (entry price)
   // - otherwise: hidden
-  const showMoveSl = isCoinbase && stopLoss !== null && plPct > 0;
+  // Now enabled for both brokers (Alpaca + Coinbase implement updateStopLoss).
+  const showMoveSl = stopLoss !== null && plPct > 0;
   const trailMode = plPct > 2;
   const newSlPrice = trailMode ? current * 0.99 : entry;
   const moveSLLabel = trailMode
@@ -360,8 +371,11 @@ function PositionCard({ position, onLiquidated, isCoinbase, stopLossPct = 0.5, o
     >
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={onTap}>
         <View style={styles.cardHeader}>
-          <View>
-            <Text style={styles.symbol}>{position.symbol}</Text>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <Text style={styles.symbol}>{position.symbol}</Text>
+              {broker && <BrokerBadge broker={broker} />}
+            </View>
             <Text style={styles.assetClass}>{position.asset_class || "crypto"}</Text>
           </View>
           <View style={{ alignItems: "flex-end" }}>
@@ -473,6 +487,17 @@ function DetailItem({
     <View style={styles.detailItem}>
       <Text style={styles.detailLabel}>{label}</Text>
       <Text style={[styles.detailValue, color ? { color } : null]}>{value}</Text>
+    </View>
+  );
+}
+
+function BrokerBadge({ broker }: { broker: "alpaca" | "coinbase" }) {
+  const isAlpaca = broker === "alpaca";
+  return (
+    <View style={[styles.brokerBadge, isAlpaca ? styles.brokerBadgeAlpaca : styles.brokerBadgeCoinbase]}>
+      <Text style={[styles.brokerBadgeText, isAlpaca ? { color: "#f0ad4e" } : { color: "#5bc0de" }]}>
+        {isAlpaca ? "Alpaca" : "Coinbase"}
+      </Text>
     </View>
   );
 }
@@ -713,5 +738,41 @@ const styles = StyleSheet.create({
   showAllToggleText: {
     color: "#aaa",
     fontSize: 13,
+  },
+  capBanner: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: "#3a2a1a",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#f0ad4e",
+  },
+  capBannerText: {
+    color: "#f0ad4e",
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  brokerBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  brokerBadgeAlpaca: {
+    backgroundColor: "#3a2a1a",
+    borderColor: "#f0ad4e",
+  },
+  brokerBadgeCoinbase: {
+    backgroundColor: "#1a2a3a",
+    borderColor: "#5bc0de",
+  },
+  brokerBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
 });

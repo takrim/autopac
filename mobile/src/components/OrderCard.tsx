@@ -17,6 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
 export default function OrderCard({ order }: Props) {
   const statusColor = STATUS_COLORS[order.status] || "#888";
   const sideColor = order.side === "BUY" ? "#5cb85c" : "#d9534f";
+  const broker = order.broker;
 
   return (
     <View style={styles.card}>
@@ -24,6 +25,13 @@ export default function OrderCard({ order }: Props) {
         <View style={styles.symbolRow}>
           <Text style={[styles.side, { color: sideColor }]}>{order.side}</Text>
           <Text style={styles.symbol}>{order.symbol}</Text>
+          {broker && (
+            <View style={[styles.brokerBadge, broker === "alpaca" ? styles.brokerBadgeAlpaca : styles.brokerBadgeCoinbase]}>
+              <Text style={[styles.brokerBadgeText, broker === "alpaca" ? { color: "#f0ad4e" } : { color: "#5bc0de" }]}>
+                {broker === "alpaca" ? "Alpaca" : "Coinbase"}
+              </Text>
+            </View>
+          )}
         </View>
         <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
           <Text style={styles.statusText}>{order.status}</Text>
@@ -33,7 +41,6 @@ export default function OrderCard({ order }: Props) {
       <View style={styles.details}>
         <Text style={styles.detail}>Qty: {order.quantity}</Text>
         <Text style={styles.detail}>Type: {order.orderType}</Text>
-        <Text style={styles.detail}>Broker: {order.broker}</Text>
       </View>
     </View>
   );
@@ -86,5 +93,25 @@ const styles = StyleSheet.create({
   detail: {
     color: "#888",
     fontSize: 13,
+  },
+  brokerBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  brokerBadgeAlpaca: {
+    backgroundColor: "#3a2a1a",
+    borderColor: "#f0ad4e",
+  },
+  brokerBadgeCoinbase: {
+    backgroundColor: "#1a2a3a",
+    borderColor: "#5bc0de",
+  },
+  brokerBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
 });

@@ -18,6 +18,7 @@ const STATUS_COLORS: Record<string, string> = {
 export default function SignalCard({ signal, onPress }: Props) {
   const statusColor = STATUS_COLORS[signal.status] || "#888";
   const actionColor = signal.action === "BUY" ? "#5cb85c" : "#d9534f";
+  const exchange = signal.exchange || signal.broker;
 
   return (
     <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.7}>
@@ -32,6 +33,13 @@ export default function SignalCard({ signal, onPress }: Props) {
             {signal.strongBuy ? "STRONG BUY" : signal.action}
           </Text>
           <Text style={styles.symbol}>{signal.symbol}</Text>
+          {exchange && (
+            <View style={[styles.exchangeBadge, exchange === "alpaca" ? styles.exchangeBadgeAlpaca : styles.exchangeBadgeCoinbase]}>
+              <Text style={[styles.exchangeBadgeText, exchange === "alpaca" ? { color: "#f0ad4e" } : { color: "#5bc0de" }]}>
+                {exchange === "alpaca" ? "Alpaca" : "Coinbase"}
+              </Text>
+            </View>
+          )}
         </View>
         <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
           <Text style={styles.statusText}>{signal.status}</Text>
@@ -161,5 +169,25 @@ const styles = StyleSheet.create({
   time: {
     color: "#666",
     fontSize: 12,
+  },
+  exchangeBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  exchangeBadgeAlpaca: {
+    backgroundColor: "#3a2a1a",
+    borderColor: "#f0ad4e",
+  },
+  exchangeBadgeCoinbase: {
+    backgroundColor: "#1a2a3a",
+    borderColor: "#5bc0de",
+  },
+  exchangeBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
 });

@@ -125,8 +125,17 @@ export default function PositionDetailScreen() {
       {/* Position Summary */}
       <View style={styles.section}>
         <View style={styles.summaryRow}>
-          <View>
-            <Text style={styles.symbolText}>{position.symbol}</Text>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Text style={styles.symbolText}>{position.symbol}</Text>
+              {position.broker && (
+                <View style={[styles.brokerBadge, position.broker === "alpaca" ? styles.brokerBadgeAlpaca : styles.brokerBadgeCoinbase]}>
+                  <Text style={[styles.brokerBadgeText, position.broker === "alpaca" ? { color: "#f0ad4e" } : { color: "#5bc0de" }]}>
+                    {position.broker === "alpaca" ? "Alpaca" : "Coinbase"}
+                  </Text>
+                </View>
+              )}
+            </View>
             <Text style={styles.subText}>{position.asset_class || "crypto"}</Text>
           </View>
           <View style={{ alignItems: "flex-end" }}>
@@ -359,4 +368,8 @@ const styles = StyleSheet.create({
   newsMeta: { color: "#888", fontSize: 11, marginTop: 4 },
   newsSummary: { color: "#aaa", fontSize: 13, marginTop: 4, lineHeight: 18 },
   emptyText: { color: "#666", fontSize: 14, textAlign: "center", paddingVertical: 16 },
+  brokerBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1 },
+  brokerBadgeAlpaca: { backgroundColor: "#3a2a1a", borderColor: "#f0ad4e" },
+  brokerBadgeCoinbase: { backgroundColor: "#1a2a3a", borderColor: "#5bc0de" },
+  brokerBadgeText: { fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
 });
