@@ -7,7 +7,7 @@ import { getWebhookSecret, CONFIG } from "../config";
 import { getTradingConfig, TradingConfig, getActiveBrokerSettings, getBrokerForSymbol } from "../api/config";
 import { sendSignalNotification, sendBulltrendBuyNotification } from "../services/notification";
 import { sendTelegramMessage } from "../services/telegram";
-import { recordRsiDip, getRecentRsiDip } from "../services/rsiDip";
+import { recordRsiDip, getRecentRsiDip, resolveExchangeForSymbol } from "../services/rsiDip";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
@@ -738,6 +738,17 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
     const dipAgeSec = Math.round(recentDip.ageMs / 1000);
     logger.info("[BULLTREND] Recent RSI dip found", { symbol, dipAgeSec, dipPrice: recentDip.data.price, dipRsi: recentDip.data.rsi });
 
+    // --- Override broker from the dip doc (per-symbol exchange routing) ---
+    // Falls back to the allowlist-resolved broker for legacy dip docs without `exchange`.
+    if (recentDip.data.exchange === "alpaca" || recentDip.data.exchange === "coinbase") {
+      if (recentDip.data.exchange !== bulltrendBroker) {
+        logger.info("[BULLTREND] Routing by stored dip exchange", {
+          symbol, allowlistBroker: bulltrendBroker, dipBroker: recentDip.data.exchange,
+        });
+      }
+      bulltrendBroker = recentDip.data.exchange;
+    }
+
     // --- Pyramid guard: block duplicate buy if position already exists ---
     if (!tradingConfig.ORDER_PYRAMID) {
       try {
@@ -967,33 +978,32 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
     return;
   }
 
-  // --- Resolve broker / allowlist check ---
+  // --- Resolve exchange by probing brokers (Alpaca first, Coinbase fallback) ---
   let beartrendBroker: "alpaca" | "coinbase";
   try {
-    const configForFilter = await getTradingConfig();
-    const resolved = getBrokerForSymbol(configForFilter, symbol);
+    const resolved = await resolveExchangeForSymbol(symbol);
     if (!resolved) {
-      logger.info("[BEARTREND] Symbol not in any broker allowlist", { symbol });
-      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nSymbol not in any broker allowlist`).catch(() => {});
+      logger.info("[BEARTREND] Symbol not tradeable on Alpaca or Coinbase", { symbol });
+      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
       await logDecision({
         handler: "beartrend",
         symbol,
         payload: { bear_trend: bearTrend, price, time },
         decision: "skipped",
-        reasons: ["Symbol not in any broker allowlist"],
-        broker: configForFilter.ACTIVE_BROKER,
+        reasons: ["Symbol not tradeable on Alpaca or Coinbase"],
+        broker: "alpaca",
         price: !isNaN(price) ? price : null,
         bookScore: null, bookSignal: null, bookReasons: null,
         volumeSpike: null, volumeRatio: null,
       });
-      res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
+      res.status(200).json({ status: "skipped_no_exchange", symbol });
       return;
     }
     beartrendBroker = resolved;
   } catch (err) {
-    logger.error("[BEARTREND] Config load failed", { error: String(err) });
-    await sendTelegramMessage(`❌ *Beartrend skip* ${symbol}\nConfig load failed: ${String(err).slice(0, 200)}`).catch(() => {});
-    res.status(500).json({ error: "Config load failed" });
+    logger.error("[BEARTREND] Exchange resolution failed", { error: String(err) });
+    await sendTelegramMessage(`❌ *Beartrend skip* ${symbol}\nExchange resolution failed: ${String(err).slice(0, 200)}`).catch(() => {});
+    res.status(500).json({ error: "Exchange resolution failed" });
     return;
   }
 
@@ -1079,6 +1089,7 @@ export async function handleBeartrendWebhook(req: Request, res: Response): Promi
       },
       cgId,
       categories,
+      beartrendBroker,
     );
     const priceStr = !isNaN(price) ? price.toString() : "n/a";
     const rsiStr = !isNaN(rsiOverride) ? rsiOverride.toString() : "n/a";

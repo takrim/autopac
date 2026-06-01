@@ -25,6 +25,51 @@ export class AlpacaBroker implements IBroker {
     };
   }
 
+  // Tiny per-process TTL cache for assetExists probes (15 min).
+  private static assetCache = new Map<string, { exists: boolean; expiresAt: number }>();
+  private static readonly ASSET_TTL_MS = 15 * 60 * 1000;
+
+  /**
+   * Check whether a symbol is tradeable on Alpaca.
+   * Normalizes crypto symbols ("BTCUSD" → "BTC/USD") for the /v2/assets lookup.
+   * Returns false on 404, true on 200, false on any other error (fail-closed).
+   */
+  async assetExists(symbol: string): Promise<boolean> {
+    const config = this.getConfig();
+    if (!config.apiKey || !config.apiSecret) {
+      logger.warn("[ALPACA] assetExists: credentials missing");
+      return false;
+    }
+
+    const isCrypto = symbol.endsWith("USD") || symbol.endsWith("USDT") || symbol.includes("/");
+    const alpacaSymbol = isCrypto && !symbol.includes("/")
+      ? symbol.replace(/USDT?$/, "") + "/USD"
+      : symbol.toUpperCase();
+
+    const cacheKey = alpacaSymbol;
+    const cached = AlpacaBroker.assetCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.exists;
+
+    try {
+      const resp = await fetch(
+        `${config.baseUrl}/v2/assets/${encodeURIComponent(alpacaSymbol)}`,
+        { headers: this.getHeaders() }
+      );
+      const exists = resp.ok;
+      AlpacaBroker.assetCache.set(cacheKey, {
+        exists,
+        expiresAt: Date.now() + AlpacaBroker.ASSET_TTL_MS,
+      });
+      if (!resp.ok && resp.status !== 404) {
+        logger.warn("[ALPACA] assetExists non-404 error", { symbol: alpacaSymbol, status: resp.status });
+      }
+      return exists;
+    } catch (err) {
+      logger.warn("[ALPACA] assetExists fetch error", { symbol: alpacaSymbol, err: String(err) });
+      return false;
+    }
+  }
+
   private async submitOrder(body: Record<string, unknown>): Promise<{ ok: boolean; data: Record<string, unknown> }> {
     const config = this.getConfig();
     const response = await fetch(`${config.baseUrl}/v2/orders`, {

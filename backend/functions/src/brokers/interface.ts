@@ -41,4 +41,6 @@ export interface IBroker {
   liquidatePosition(symbol: string): Promise<Record<string, unknown>>;
   /** Return all positions with P&L and fee details for the portfolio view. */
   getDetailedPositions?(): Promise<DetailedPosition[]>;
+  /** Check whether a symbol is tradeable on this exchange. Used by the RSI dip collector to stamp `exchange`. */
+  assetExists?(symbol: string): Promise<boolean>;
 }

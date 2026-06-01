@@ -8,9 +8,32 @@
 
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
+import { getBroker } from "../brokers";
 
 const db = getFirestore();
 const COLL = "rsi_dips";
+
+/**
+ * Probe Alpaca first, then Coinbase. Returns the first exchange the symbol
+ * exists on, or null if neither carries it.
+ */
+export async function resolveExchangeForSymbol(
+  symbol: string,
+): Promise<"alpaca" | "coinbase" | null> {
+  try {
+    const alpaca = getBroker("alpaca");
+    if (alpaca.assetExists && await alpaca.assetExists(symbol)) return "alpaca";
+  } catch (err) {
+    logger.warn("[RSI_DIP] alpaca probe failed", { symbol, err: String(err) });
+  }
+  try {
+    const coinbase = getBroker("coinbase");
+    if (coinbase.assetExists && await coinbase.assetExists(symbol)) return "coinbase";
+  } catch (err) {
+    logger.warn("[RSI_DIP] coinbase probe failed", { symbol, err: String(err) });
+  }
+  return null;
+}
 
 export interface RsiDipDoc {
   symbol: string;
@@ -18,6 +41,8 @@ export interface RsiDipDoc {
   rsi: number | null;
   cgId: string | null;
   categories: string[];
+  /** Exchange where this symbol is tradeable. Alpaca is probed first, Coinbase is fallback. */
+  exchange: "alpaca" | "coinbase";
   dipAt: Timestamp;
   lastBeartrendId: string | null;
 }
@@ -28,6 +53,7 @@ export async function recordRsiDip(
   payload: { price: number | null; rsi: number | null; beartrendId: string | null },
   cgId: string | null,
   categories: string[],
+  exchange: "alpaca" | "coinbase",
 ): Promise<string> {
   const id = symbol.toUpperCase();
   await db.collection(COLL).doc(id).set({
@@ -36,6 +62,7 @@ export async function recordRsiDip(
     rsi: payload.rsi,
     cgId,
     categories,
+    exchange,
     dipAt: FieldValue.serverTimestamp(),
     lastBeartrendId: payload.beartrendId,
   });

@@ -97,6 +97,37 @@ export class CoinbaseBroker implements IBroker {
     return `${base}-USD`;
   }
 
+  // Tiny per-process TTL cache for assetExists probes (15 min).
+  private static assetCache = new Map<string, { exists: boolean; expiresAt: number }>();
+  private static readonly ASSET_TTL_MS = 15 * 60 * 1000;
+
+  /**
+   * Check whether a symbol is tradeable on Coinbase.
+   * Normalizes "BTCUSD" → "BTC-USD" then hits /products/{product_id}.
+   * Returns false on 404, true on 200, false on any other error (fail-closed).
+   */
+  async assetExists(symbol: string): Promise<boolean> {
+    const productId = this.toProductId(symbol);
+    const cached = CoinbaseBroker.assetCache.get(productId);
+    if (cached && cached.expiresAt > Date.now()) return cached.exists;
+
+    try {
+      const { ok, data } = await this.request("GET", `/products/${encodeURIComponent(productId)}`);
+      const exists = ok;
+      CoinbaseBroker.assetCache.set(productId, {
+        exists,
+        expiresAt: Date.now() + CoinbaseBroker.ASSET_TTL_MS,
+      });
+      if (!ok && (data?.httpStatus as number) !== 404) {
+        logger.warn("[COINBASE] assetExists non-404 error", { productId, data });
+      }
+      return exists;
+    } catch (err) {
+      logger.warn("[COINBASE] assetExists error", { productId, err: String(err) });
+      return false;
+    }
+  }
+
   /**
    * Poll Coinbase until the order is FILLED or CANCELLED/EXPIRED.
    * Returns { status, filledSize } where filledSize is in base currency.
