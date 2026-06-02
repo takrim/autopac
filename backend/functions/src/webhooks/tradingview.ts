@@ -747,6 +747,26 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
     }
     bulltrendBroker = recentDip.data.exchange;
 
+    // --- Coinbase buys temporarily disabled (Alpaca-only mode) ---
+    if (bulltrendBroker === "coinbase") {
+      logger.info("[BULLTREND] Coinbase buys disabled — skipping", { symbol });
+      await sendTelegramMessage(`🚫 *Bulltrend skip* ${symbol}\nCoinbase buys are temporarily disabled (Alpaca-only mode)`).catch(() => {});
+      await logDecision({
+        handler: "bulltrend",
+        symbol,
+        payload: { bullish_trend: bullishTrend, price, volume, time },
+        decision: "skipped",
+        reasons: ["Coinbase buys temporarily disabled (Alpaca-only mode)"],
+        broker: bulltrendBroker,
+        price: !isNaN(price) ? price : null,
+        bookScore: null, bookSignal: null, bookReasons: null,
+        volumeSpike: null, volumeRatio: null,
+        meta: { bulltrendId: bulltrendDoc.id, dipBroker: recentDip.data.exchange },
+      });
+      res.json({ status: "stored", id: bulltrendDoc.id, symbol, coinbaseDisabled: true });
+      return;
+    }
+
     // --- Pyramid guard: block duplicate buy if position already exists ---
     if (!tradingConfig.ORDER_PYRAMID) {
       try {
