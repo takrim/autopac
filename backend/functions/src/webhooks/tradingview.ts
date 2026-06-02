@@ -13,6 +13,8 @@ import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
 import { getBroker } from "../brokers";
 import { fetchOrderBook, scoreBook, normalizeBookSymbol } from "../services/orderbook";
+import { getActiveStrategy } from "../services/strategyConfig";
+import { runBulltrendDivergence, runBeartrendDivergence } from "../services/strategies/divergence";
 
 const db = getFirestore();
 
@@ -20,13 +22,13 @@ const db = getFirestore();
 // CoinGecko category lookup — used by bulltrend webhook to skip defi/meme
 // ---------------------------------------------------------------------------
 const CG_BASE = "https://pro-api.coingecko.com/api/v3";
-const FORBIDDEN_CATEGORY_REGEX = /\b(defi|meme)\b/i;
+export const FORBIDDEN_CATEGORY_REGEX = /\b(defi|meme)\b/i;
 
 // Bulltrend requires a recent rsi_dips entry no older than this window.
 const RSI_DIP_WINDOW_MS = 27 * 60 * 1000;
 
 // Bulltrend-specific initial stop-loss (overrides global STOP_LOSS_PCT for this entry path).
-const BULLTREND_STOP_LOSS_PCT = 2.0;
+export const BULLTREND_STOP_LOSS_PCT = 2.0;
 
 /**
  * Resolve a trading symbol (e.g. "ETHUSD", "BTCUSDT") to a CoinGecko coin id,
@@ -35,7 +37,7 @@ const BULLTREND_STOP_LOSS_PCT = 2.0;
  * Returns `{ id, categories }`. `categories` is `null` when the API failed
  * or no match was found — callers should treat that as fail-closed.
  */
-async function cgFetchCategories(symbol: string): Promise<{ id: string | null; categories: string[] | null }> {
+export async function cgFetchCategories(symbol: string): Promise<{ id: string | null; categories: string[] | null }> {
   const apiKey = process.env.COINGECKO_API_KEY;
   if (!apiKey) {
     logger.error("[BULLTREND] Missing COINGECKO_API_KEY secret");
@@ -157,7 +159,7 @@ async function getRecentStopFills(symbol: string): Promise<Array<Record<string, 
 /**
  * Persist a signal decision record to Firestore for full audit trail.
  */
-async function logDecision(data: {
+export async function logDecision(data: {
   handler: "strategy" | "bulltrend" | "beartrend";
   symbol: string;
   payload: Record<string, unknown>;
@@ -616,6 +618,11 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
 export async function handleBulltrendWebhook(req: Request, res: Response): Promise<void> {
   logger.info("[BULLTREND] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
 
+  // Strategy dispatch — divergence path is fully self-contained.
+  if ((await getActiveStrategy()) === "divergence") {
+    return runBulltrendDivergence(req, res);
+  }
+
   const body = req.body || {};
 
   // --- Validate secret ---
@@ -959,6 +966,11 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
  */
 export async function handleBeartrendWebhook(req: Request, res: Response): Promise<void> {
   logger.info("[BEARTREND] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
+
+  // Strategy dispatch — divergence path liquidates instead of recording a dip.
+  if ((await getActiveStrategy()) === "divergence") {
+    return runBeartrendDivergence(req, res);
+  }
 
   const body = req.body || {};
 
