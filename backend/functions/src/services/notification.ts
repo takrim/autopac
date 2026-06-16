@@ -140,7 +140,6 @@ export async function sendSignalNotification(signal: Signal): Promise<void> {
 
 /**
  * Send a custom push notification to every registered Expo token.
- * Used by burstScanner (buy executed) and positionLiquidator (winning exits).
  */
 async function sendPushToAllTokens(
   title: string,
@@ -237,25 +236,6 @@ export async function sendBurstBuyNotification(
 }
 
 /**
- * Push fired by positionLiquidator when a position exits with positive P/L.
- * `reason` is a short human label: "RSI cut", "trailing stop", "external close".
- */
-export async function sendExitNotification(
-  symbol: string,
-  pnlPct: number,
-  reason: string,
-  signalId: string = ""
-): Promise<void> {
-  const sign = pnlPct >= 0 ? "+" : "";
-  await sendPushToAllTokens(
-    "💰 Position Closed",
-    `SOLD: ${symbol} ${sign}${pnlPct.toFixed(2)}% (${reason})`,
-    { type: "POSITION_EXIT", signalId, symbol, pnlPct: pnlPct.toFixed(2), reason },
-    "EXIT_WIN"
-  );
-}
-
-/**
  * Push fired when the bulltrend webhook auto-executes a BUY after category check.
  */
 export async function sendBulltrendBuyNotification(
@@ -271,27 +251,6 @@ export async function sendBulltrendBuyNotification(
     `Bulltrend BUY: ${symbol} @ ${priceStr}`,
     { type: "BULLTREND_BUY", signalId, symbol, price: String(price) },
     "BULLTREND_BUY"
-  );
-}
-
-/**
- * Push fired by positionLiquidator when a trailing stop is armed or raised.
- */
-export async function sendTrailingStopNotification(
-  symbol: string,
-  newSL: number,
-  gainPct: number,
-  raised: boolean
-): Promise<void> {
-  const slStr = newSL >= 1
-    ? `$${newSL.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-    : `$${newSL.toPrecision(4)}`;
-  const sign = gainPct >= 0 ? "+" : "";
-  await sendPushToAllTokens(
-    raised ? "🔼 Trailing Stop Raised" : "🛡️ Trailing Stop Armed",
-    `${symbol}: SL → ${slStr} (P/L ${sign}${gainPct.toFixed(2)}%)`,
-    { type: "TRAILING_STOP", symbol, newSL: String(newSL), gainPct: gainPct.toFixed(2), raised: String(raised) },
-    raised ? "TRAILING_STOP_RAISED" : "TRAILING_STOP_ARMED"
   );
 }
 

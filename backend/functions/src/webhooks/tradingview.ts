@@ -546,7 +546,7 @@ export async function handleWebhook(req: Request, res: Response): Promise<void> 
     willNotify: isStrongBuy,
   });
   if (isStrongBuy) {
-    // DISABLED — push notifications now come from burstScanner / positionLiquidator (Coinbase auto-trading flow)
+    // DISABLED — push notifications now come from the Coinbase auto-trading flow
     // try {
     //   await sendSignalNotification({ ...signal, ...freshData, id: docRef.id } as Signal);
     //   logger.info("[WEBHOOK] Notification sent for Strong Buy", { signalId: docRef.id, symbol: payload.symbol });
