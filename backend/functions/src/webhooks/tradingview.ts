@@ -7,14 +7,13 @@ import { getWebhookSecret, CONFIG } from "../config";
 import { getTradingConfig, TradingConfig, getActiveBrokerSettings, getBrokerForSymbol } from "../api/config";
 import { sendSignalNotification, sendBulltrendBuyNotification } from "../services/notification";
 import { sendTelegramMessage } from "../services/telegram";
-import { recordRsiDip, resolveExchangeForSymbol } from "../services/rsiDip";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
 import { getBroker } from "../brokers";
 import { fetchOrderBook, scoreBook, normalizeBookSymbol } from "../services/orderbook";
 import { getActiveStrategy } from "../services/strategyConfig";
-import { runBulltrendDivergence, runBeartrendDivergence } from "../services/strategies/divergence";
+import { runBulltrendDivergence, runBeartrendLiquidate } from "../services/strategies/divergence";
 
 const db = getFirestore();
 
@@ -903,200 +902,17 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
 }
 
 /**
- * POST /tradingview/beartrend — RSI Dip Collector.
+ * POST /tradingview/beartrend — liquidate the symbol's open position.
  *
- * Allowlist + CoinGecko category gate (non-defi/meme). On pass, upsert into
- * the `rsi_dips` collection so a subsequent bulltrend hit for the same symbol
- * can buy. Audit row still written to `beartrends`.
+ * A beartrend alert always exits the position (full liquidation) on whichever
+ * broker holds it, regardless of the active bull strategy. The legacy
+ * trend-mode RSI-dip collector is retired: bulltrend now buys directly without
+ * a pre-collected dip, so there is nothing left to collect dips for.
  *
  * Expected payload:
- *   { "bear_trend": "true", "symbol": "ETHUSD", "price": "2100.50", "time": "...", "rsi": "28.5", "secret": "..." }
+ *   { "symbol": "ETHUSD", "price": "2100.50", "time": "...", "secret": "..." }
  */
 export async function handleBeartrendWebhook(req: Request, res: Response): Promise<void> {
   logger.info("[BEARTREND] Webhook hit", { path: req.path, body: JSON.stringify(req.body || {}).slice(0, 300) });
-
-  // Strategy dispatch — divergence path liquidates instead of recording a dip.
-  if ((await getActiveStrategy()) === "divergence") {
-    return runBeartrendDivergence(req, res);
-  }
-
-  const body = req.body || {};
-
-  // --- Validate secret ---
-  const secret = String(body.secret || "");
-  let webhookSecret: string;
-  try {
-    webhookSecret = getWebhookSecret();
-  } catch {
-    logger.error("[BEARTREND] Missing WEBHOOK_SECRET");
-    await sendTelegramMessage(`❌ *Beartrend skip*\nServer misconfig — WEBHOOK_SECRET missing`).catch(() => {});
-    res.status(500).json({ error: "Server configuration error" });
-    return;
-  }
-
-  const secretBuf = Buffer.from(secret);
-  const expectedBuf = Buffer.from(webhookSecret);
-  if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
-    logger.warn("[BEARTREND] Invalid secret");
-    await sendTelegramMessage(`🚫 *Beartrend skip*\nInvalid webhook secret`).catch(() => {});
-    res.status(401).json({ error: "Invalid secret" });
-    return;
-  }
-
-  // --- Validate payload ---
-  const symbol = String(body.symbol || "").toUpperCase().trim();
-  const bearTrend = String(body.bear_trend || "").toLowerCase().trim() === "true";
-  const price = parseFloat(body.price);
-  const time = String(body.time || "");
-  const rsiOverride = body.rsi !== undefined ? parseFloat(body.rsi) : NaN;
-
-  if (!symbol) {
-    await sendTelegramMessage(`🚫 *Beartrend skip*\nMissing symbol in payload`).catch(() => {});
-    res.status(400).json({ error: "Missing symbol" });
-    return;
-  }
-
-  // --- Resolve exchange by probing brokers (Alpaca first, Coinbase fallback) ---
-  let beartrendBroker: "alpaca" | "coinbase";
-  try {
-    const resolved = await resolveExchangeForSymbol(symbol);
-    if (!resolved) {
-      logger.info("[BEARTREND] Symbol not tradeable on Alpaca or Coinbase", { symbol });
-      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
-      await logDecision({
-        handler: "beartrend",
-        symbol,
-        payload: { bear_trend: bearTrend, price, time },
-        decision: "skipped",
-        reasons: ["Symbol not tradeable on Alpaca or Coinbase"],
-        broker: "alpaca",
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-      });
-      res.status(200).json({ status: "skipped_no_exchange", symbol });
-      return;
-    }
-    beartrendBroker = resolved;
-  } catch (err) {
-    logger.error("[BEARTREND] Exchange resolution failed", { error: String(err) });
-    await sendTelegramMessage(`❌ *Beartrend skip* ${symbol}\nExchange resolution failed: ${String(err).slice(0, 200)}`).catch(() => {});
-    res.status(500).json({ error: "Exchange resolution failed" });
-    return;
-  }
-
-  try {
-    // --- Always store in beartrends collection (history/audit) ---
-    const beartrendDoc = await db.collection("beartrends").add({
-      symbol,
-      bearTrend,
-      price: !isNaN(price) ? price : null,
-      rsi: !isNaN(rsiOverride) ? rsiOverride : null,
-      time: time || null,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-    logger.info("[BEARTREND] Stored", { id: beartrendDoc.id, symbol, bearTrend });
-
-    // --- Only collect dips when bear_trend=true ---
-    if (!bearTrend) {
-      await sendTelegramMessage(`ℹ️ *Beartrend stored* ${symbol}\nbear_trend=false — no dip recorded`).catch(() => {});
-      await logDecision({
-        handler: "beartrend",
-        symbol,
-        payload: { bear_trend: bearTrend, price, time },
-        decision: "skipped",
-        reasons: ["bear_trend is false — no dip recorded"],
-        broker: beartrendBroker,
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-        meta: { beartrendId: beartrendDoc.id },
-      });
-      res.json({ status: "stored", id: beartrendDoc.id, symbol, bear_trend: bearTrend });
-      return;
-    }
-
-    // --- CoinGecko category check (fail-closed if unavailable) ---
-    const { id: cgId, categories } = await cgFetchCategories(symbol);
-    if (categories === null) {
-      logger.warn("[BEARTREND] CoinGecko categories unavailable — fail-closed skip", { symbol, cgId });
-      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nCoinGecko categories unavailable (cgId=${cgId ?? "none"}) — fail-closed`).catch(() => {});
-      await logDecision({
-        handler: "beartrend",
-        symbol,
-        payload: { bear_trend: bearTrend, price, time },
-        decision: "rejected",
-        reasons: ["CoinGecko categories unavailable — fail-closed skip"],
-        broker: beartrendBroker,
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-        meta: { beartrendId: beartrendDoc.id, cgId },
-      });
-      res.json({ status: "stored", id: beartrendDoc.id, symbol, categoryUnavailable: true });
-      return;
-    }
-
-    const forbidden = categories.filter(c => FORBIDDEN_CATEGORY_REGEX.test(c));
-    if (forbidden.length > 0) {
-      logger.info("[BEARTREND] Forbidden category — skipping dip record", { symbol, cgId, forbidden });
-      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nForbidden category: ${forbidden.join(", ")}`).catch(() => {});
-      await logDecision({
-        handler: "beartrend",
-        symbol,
-        payload: { bear_trend: bearTrend, price, time },
-        decision: "skipped",
-        reasons: [`Forbidden category: ${forbidden.join(", ")}`],
-        broker: beartrendBroker,
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-        meta: { beartrendId: beartrendDoc.id, cgId, categories, forbidden },
-      });
-      res.json({ status: "stored", id: beartrendDoc.id, symbol, forbidden, cgId });
-      return;
-    }
-
-    // --- Record the dip ---
-    const dipId = await recordRsiDip(
-      symbol,
-      {
-        price: !isNaN(price) ? price : null,
-        rsi: !isNaN(rsiOverride) ? rsiOverride : null,
-        beartrendId: beartrendDoc.id,
-      },
-      cgId,
-      categories,
-      beartrendBroker,
-    );
-    const priceStr = !isNaN(price) ? price.toString() : "n/a";
-    const rsiStr = !isNaN(rsiOverride) ? rsiOverride.toString() : "n/a";
-    await sendTelegramMessage(`📉 *RSI Dip collected* ${symbol} @ ${priceStr}\nRSI=${rsiStr} categories: ${categories.slice(0, 5).join(", ") || "(none)"}`).catch(() => {});
-    await logDecision({
-      handler: "beartrend",
-      symbol,
-      payload: { bear_trend: bearTrend, price, time, rsiOverride: !isNaN(rsiOverride) ? rsiOverride : null },
-      decision: "stored",
-      reasons: ["RSI dip recorded"],
-      broker: beartrendBroker,
-      rsi: !isNaN(rsiOverride) ? rsiOverride : null,
-      price: !isNaN(price) ? price : null,
-      bookScore: null, bookSignal: null, bookReasons: null,
-      volumeSpike: null, volumeRatio: null,
-      meta: { beartrendId: beartrendDoc.id, dipId, cgId, categories },
-    });
-
-    res.json({
-      status: "dip_collected",
-      id: beartrendDoc.id,
-      dipId,
-      symbol,
-      cgId,
-      categories,
-    });
-  } catch (err) {
-    logger.error("[BEARTREND] Error processing webhook", { symbol, bearTrend, error: String(err) });
-    await sendTelegramMessage(`❌ *Beartrend webhook error* ${symbol}\n${String(err).slice(0, 300)}`).catch(() => {});
-    res.status(500).json({ error: "Internal server error" });
-  }
+  return runBeartrendLiquidate(req, res);
 }

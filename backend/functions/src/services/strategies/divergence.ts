@@ -256,22 +256,23 @@ export async function runBulltrendDivergence(req: Request, res: Response): Promi
 }
 
 // ---------------------------------------------------------------------------
-// Bear-divergence: liquidate position if held
+// Beartrend liquidation: exit the symbol's open position if held.
+// Shared by both strategies — a beartrend alert always liquidates.
 // ---------------------------------------------------------------------------
 
-export async function runBeartrendDivergence(req: Request, res: Response): Promise<void> {
-  logger.info("[BEARDIV] Webhook hit", { body: JSON.stringify(req.body || {}).slice(0, 300) });
+export async function runBeartrendLiquidate(req: Request, res: Response): Promise<void> {
+  logger.info("[BEARTREND] Webhook hit", { body: JSON.stringify(req.body || {}).slice(0, 300) });
   const body = (req.body || {}) as Record<string, unknown>;
 
   if (!checkSecret(body)) {
-    await sendTelegramMessage(`🚫 *Bear divergence skip*\nInvalid webhook secret`).catch(() => {});
+    await sendTelegramMessage(`🚫 *Beartrend skip*\nInvalid webhook secret`).catch(() => {});
     res.status(401).json({ error: "Invalid secret" });
     return;
   }
 
   const parsed = parsePayload(body);
   if (!parsed) {
-    await sendTelegramMessage(`🚫 *Bear divergence skip*\nMissing symbol`).catch(() => {});
+    await sendTelegramMessage(`🚫 *Beartrend skip*\nMissing symbol`).catch(() => {});
     res.status(400).json({ error: "Missing symbol" });
     return;
   }
@@ -282,7 +283,7 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
   try {
     const resolved = await resolveExchangeForSymbol(symbol);
     if (!resolved) {
-      await sendTelegramMessage(`🚫 *Bear divergence skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
+      await sendTelegramMessage(`🚫 *Beartrend skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
       await logDecision({
         handler: "beartrend", symbol,
         payload: { price, time, source: "divergence" },
@@ -297,8 +298,8 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
     }
     brokerName = resolved;
   } catch (err) {
-    logger.error("[BEARDIV] Exchange resolution failed", { error: String(err) });
-    await sendTelegramMessage(`❌ *Bear divergence skip* ${symbol}\nExchange resolution failed: ${String(err).slice(0, 200)}`).catch(() => {});
+    logger.error("[BEARTREND] Exchange resolution failed", { error: String(err) });
+    await sendTelegramMessage(`❌ *Beartrend skip* ${symbol}\nExchange resolution failed: ${String(err).slice(0, 200)}`).catch(() => {});
     res.status(500).json({ error: "Exchange resolution failed" });
     return;
   }
@@ -319,14 +320,14 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
     const broker = getBroker(brokerName);
     position = await broker.getPosition(symbol);
   } catch (err) {
-    logger.error("[BEARDIV] getPosition failed", { symbol, error: String(err) });
-    await sendTelegramMessage(`❌ *Bear divergence skip* ${symbol}\ngetPosition failed: ${String(err).slice(0, 200)}`).catch(() => {});
+    logger.error("[BEARTREND] getPosition failed", { symbol, error: String(err) });
+    await sendTelegramMessage(`❌ *Beartrend skip* ${symbol}\ngetPosition failed: ${String(err).slice(0, 200)}`).catch(() => {});
     res.status(500).json({ error: "getPosition failed" });
     return;
   }
 
   if (!position || position.qty <= 0) {
-    await sendTelegramMessage(`ℹ️ *Bear divergence* ${symbol}\nNo open position to liquidate`).catch(() => {});
+    await sendTelegramMessage(`ℹ️ *Beartrend* ${symbol}\nNo open position to liquidate`).catch(() => {});
     await logDecision({
       handler: "beartrend", symbol,
       payload: { price, time, source: "divergence" },
@@ -342,7 +343,7 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
 
   // ── Alpaca market-hours gate ──────────────────────────────────────────
   if (brokerName === "alpaca" && !isUsStockMarketOpen()) {
-    await sendTelegramMessage(`⏸ *Bear divergence deferred* ${symbol}\nAlpaca market closed — liquidation skipped`).catch(() => {});
+    await sendTelegramMessage(`⏸ *Beartrend deferred* ${symbol}\nAlpaca market closed — liquidation skipped`).catch(() => {});
     await logDecision({
       handler: "beartrend", symbol,
       payload: { price, time, source: "divergence" },
@@ -360,15 +361,15 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
   try {
     const broker = getBroker(brokerName);
     const result = await broker.liquidatePosition(symbol);
-    logger.info("[BEARDIV] Liquidated", { symbol, broker: brokerName, qty: position.qty, result });
+    logger.info("[BEARTREND] Liquidated", { symbol, broker: brokerName, qty: position.qty, result });
     await sendTelegramMessage(
-      `📤 *Bear divergence — LIQUIDATED* ${symbol}\nbroker=${brokerName} qty=${position.qty} px=${Number.isFinite(price) ? price : "n/a"}`,
+      `📤 *Beartrend — LIQUIDATED* ${symbol}\nbroker=${brokerName} qty=${position.qty} px=${Number.isFinite(price) ? price : "n/a"}`,
     ).catch(() => {});
     await logDecision({
       handler: "beartrend", symbol,
       payload: { price, time, source: "divergence" },
       decision: "sold",
-      reasons: ["Bear divergence — liquidated full position"],
+      reasons: ["Beartrend — liquidated full position"],
       broker: brokerName, price: Number.isFinite(price) ? price : null,
       bookScore: null, bookSignal: null, bookReasons: null,
       volumeSpike: null, volumeRatio: null,
@@ -376,8 +377,8 @@ export async function runBeartrendDivergence(req: Request, res: Response): Promi
     });
     res.json({ status: "liquidated", id: beartrendDoc.id, symbol, qty: position.qty, result });
   } catch (err) {
-    logger.error("[BEARDIV] liquidatePosition threw", { symbol, error: String(err) });
-    await sendTelegramMessage(`❌ *Bear divergence LIQUIDATION failed* ${symbol}\n${String(err).slice(0, 250)}`).catch(() => {});
+    logger.error("[BEARTREND] liquidatePosition threw", { symbol, error: String(err) });
+    await sendTelegramMessage(`❌ *Beartrend LIQUIDATION failed* ${symbol}\n${String(err).slice(0, 250)}`).catch(() => {});
     await logDecision({
       handler: "beartrend", symbol,
       payload: { price, time, source: "divergence" },
