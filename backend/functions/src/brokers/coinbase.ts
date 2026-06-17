@@ -1121,6 +1121,16 @@ export class CoinbaseBroker implements IBroker {
           }
         }
 
+        // If the sell couldn't be fully matched to buys (buy fills truncated by
+        // the ~1000-fill lookback, or the position was opened outside the
+        // captured window), treat the unmatched quantity as break-even
+        // (cost = sell price) rather than zero-cost. Otherwise the unmatched
+        // proceeds masquerade as pure profit and corrupt the realized-P&L
+        // totals — e.g. NEAR-USD reporting +$99 on a ~$100 sell.
+        if (sellRemaining > 1e-10) {
+          buyCost += sellRemaining * sell.price;
+        }
+
         const realizedPl = sellRevenue - buyCost;
 
         for (const [period, cutoff] of Object.entries(windows)) {
