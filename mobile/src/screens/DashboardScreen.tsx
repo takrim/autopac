@@ -209,7 +209,7 @@ export default function DashboardScreen() {
       {/* Performance Metrics — Coinbase realized */}
       {performance && (
         <View style={styles.perfCard}>
-          <Text style={styles.perfTitle}>Coinbase Realized P&L</Text>
+          <Text style={styles.perfTitle}>Realized P&L</Text>
           <View style={styles.perfRow}>
             {(["1d", "1w", "1m", "1y"] as const).map((period) => {
               const metric = performance[period];

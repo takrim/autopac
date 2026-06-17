@@ -13,6 +13,135 @@ function getHeaders() {
   };
 }
 
+type PerfWindow = {
+  realizedPl: number;
+  trades: number;
+  tradeDetails: Array<{ symbol: string; time: number; qty: number; sellPrice: number; realizedPl: number }>;
+};
+
+// Ignore any fills before this date so realized-P&L totals line up with the
+// Coinbase reset (May 2, 2026 00:00:00 UTC).
+const PNL_RESET_DATE = 1777680000000;
+
+/**
+ * Compute Alpaca realized P&L over rolling 1d/1w/1m/1y windows by FIFO-matching
+ * SELL fills against BUY fills per symbol. Mirrors the Coinbase
+ * getPerformanceMetrics() shape so the two can be merged for the dashboard.
+ * Stocks are commission-free on Alpaca, so fees are treated as 0.
+ */
+async function fetchAlpacaPerformanceMetrics(): Promise<Record<string, PerfWindow>> {
+  const config = getAlpacaConfig();
+  const nowMs = Date.now();
+  const windows: Record<string, number> = {
+    "1d": nowMs - 24 * 60 * 60 * 1000,
+    "1w": nowMs - 7 * 24 * 60 * 60 * 1000,
+    "1m": nowMs - 30 * 24 * 60 * 60 * 1000,
+    "1y": nowMs - 365 * 24 * 60 * 60 * 1000,
+  };
+
+  const afterIso = new Date(Math.max(PNL_RESET_DATE, windows["1y"])).toISOString();
+
+  // Paginate FILL activities. Alpaca pages via page_token = id of the last row.
+  const fills: Array<{ symbol: string; side: string; qty: number; price: number; time: number }> = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const url = new URL(`${config.baseUrl}/v2/account/activities/FILL`);
+    url.searchParams.set("after", afterIso);
+    url.searchParams.set("page_size", "100");
+    if (pageToken) url.searchParams.set("page_token", pageToken);
+
+    const resp = await fetch(url.toString(), { headers: getHeaders() });
+    if (!resp.ok) break;
+    const rows = (await resp.json()) as Array<Record<string, unknown>>;
+    if (!Array.isArray(rows) || rows.length === 0) break;
+
+    for (const a of rows) {
+      const symbol = String(a.symbol || "");
+      const side = String(a.side || "").toLowerCase();
+      const qty = parseFloat(String(a.qty || "0"));
+      const price = parseFloat(String(a.price || "0"));
+      const time = new Date(String(a.transaction_time || "")).getTime();
+      if (!symbol || !(qty > 0) || !(price > 0) || !Number.isFinite(time)) continue;
+      fills.push({ symbol, side, qty, price, time });
+    }
+
+    pageToken = rows.length > 0 ? (rows[rows.length - 1].id as string) : undefined;
+    if (rows.length < 100 || !pageToken) break;
+  }
+
+  const result: Record<string, PerfWindow> = {
+    "1d": { realizedPl: 0, trades: 0, tradeDetails: [] },
+    "1w": { realizedPl: 0, trades: 0, tradeDetails: [] },
+    "1m": { realizedPl: 0, trades: 0, tradeDetails: [] },
+    "1y": { realizedPl: 0, trades: 0, tradeDetails: [] },
+  };
+
+  // Group by symbol into buys/sells (post-reset only).
+  const bySym: Record<string, { buys: typeof fills; sells: typeof fills }> = {};
+  for (const f of fills) {
+    if (f.time < PNL_RESET_DATE) continue;
+    const g = (bySym[f.symbol] ||= { buys: [], sells: [] });
+    if (f.side === "sell") g.sells.push(f);
+    else if (f.side === "buy") g.buys.push(f);
+  }
+
+  for (const symbol of Object.keys(bySym)) {
+    const sells = bySym[symbol].sells.sort((a, b) => a.time - b.time);
+    const buys = bySym[symbol].buys.sort((a, b) => a.time - b.time);
+    let bi = 0;
+    let buyRemaining = buys.length > 0 ? buys[0].qty : 0;
+
+    for (const sell of sells) {
+      let sellRemaining = sell.qty;
+      const sellRevenue = sell.qty * sell.price;
+      let buyCost = 0;
+
+      while (sellRemaining > 1e-9 && bi < buys.length) {
+        const matchQty = Math.min(sellRemaining, buyRemaining);
+        buyCost += matchQty * buys[bi].price;
+        sellRemaining -= matchQty;
+        buyRemaining -= matchQty;
+        if (buyRemaining <= 1e-9) {
+          bi++;
+          buyRemaining = bi < buys.length ? buys[bi].qty : 0;
+        }
+      }
+
+      // Unmatched quantity (buy fills truncated / outside window) → break-even,
+      // so a missing cost basis contributes ~0 rather than fabricated profit.
+      if (sellRemaining > 1e-9) buyCost += sellRemaining * sell.price;
+
+      const realizedPl = sellRevenue - buyCost;
+      for (const [period, cutoff] of Object.entries(windows)) {
+        if (sell.time >= cutoff) {
+          result[period].realizedPl += realizedPl;
+          result[period].trades += 1;
+          result[period].tradeDetails.push({ symbol, time: sell.time, qty: sell.qty, sellPrice: sell.price, realizedPl });
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Merge an additional broker's windowed realized-P&L into a base performance
+ * object (sums realizedPl/trades, concatenates tradeDetails per window).
+ */
+function mergePerformance(base: Record<string, unknown>, add: Record<string, PerfWindow>): void {
+  for (const period of ["1d", "1w", "1m", "1y"]) {
+    const addWin = add[period];
+    if (!addWin) continue;
+    const baseWin = (base[period] as PerfWindow | undefined) ?? { realizedPl: 0, trades: 0, tradeDetails: [] };
+    base[period] = {
+      realizedPl: baseWin.realizedPl + addWin.realizedPl,
+      trades: baseWin.trades + addWin.trades,
+      tradeDetails: [...(baseWin.tradeDetails ?? []), ...addWin.tradeDetails],
+    };
+  }
+}
+
 /**
  * GET /account — proxy Alpaca account info (equity, buying power, P&L).
  */
@@ -75,9 +204,10 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
   try {
     const tradingConfig = await getTradingConfig();
 
-    const [coinbaseResult, alpacaResult] = await Promise.allSettled([
+    const [coinbaseResult, alpacaResult, alpacaPerfResult] = await Promise.allSettled([
       fetchCoinbasePositions(),
       fetchAlpacaPositions(tradingConfig.SIMULATED_FEE_RATE),
+      fetchAlpacaPerformanceMetrics(),
     ]);
 
     const positions: Array<Record<string, unknown>> = [];
@@ -100,6 +230,14 @@ export async function handleGetPositions(req: Request, res: Response): Promise<v
       }
     } else if (alpacaResult.status === "rejected") {
       logger.warn("[API] Alpaca positions fetch failed", { error: String(alpacaResult.reason) });
+    }
+
+    // Merge Alpaca realized P&L into the (Coinbase-sourced) performance windows
+    // so closed Alpaca stock trades show up on the dashboard's realized-P&L card.
+    if (alpacaPerfResult.status === "fulfilled" && alpacaPerfResult.value) {
+      mergePerformance(performance, alpacaPerfResult.value);
+    } else if (alpacaPerfResult.status === "rejected") {
+      logger.warn("[API] Alpaca performance fetch failed", { error: String(alpacaPerfResult.reason) });
     }
 
     res.json({ positions, cashBalance, performance });
