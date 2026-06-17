@@ -19,7 +19,7 @@ import crypto from "crypto";
 
 import { getWebhookSecret } from "../../config";
 import { Signal } from "../../types";
-import { getTradingConfig, getBrokerForSymbol } from "../../api/config";
+import { getTradingConfig } from "../../api/config";
 import { getBroker } from "../../brokers";
 import { executeOrder } from "../../api/trade";
 import { sendTelegramMessage } from "../telegram";
@@ -86,24 +86,24 @@ export async function runBulltrendDivergence(req: Request, res: Response): Promi
   }
   const { symbol, price, time } = parsed;
 
-  // ── Broker resolution (per-symbol allowlist) ──────────────────────────
+  // ── Broker resolution (Alpaca first by asset availability, else Coinbase) ─
   let broker: "alpaca" | "coinbase";
   let tradingConfig;
   try {
     tradingConfig = await getTradingConfig();
-    const resolved = getBrokerForSymbol(tradingConfig, symbol);
+    const resolved = await resolveExchangeForSymbol(symbol);
     if (!resolved) {
-      await sendTelegramMessage(`🚫 *Bull divergence skip* ${symbol}\nNot in any broker allowlist`).catch(() => {});
+      await sendTelegramMessage(`🚫 *Bull divergence skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
       await logDecision({
         handler: "bulltrend", symbol,
         payload: { price, time, source: "divergence" },
-        decision: "skipped", reasons: ["Symbol not in any broker allowlist"],
+        decision: "skipped", reasons: ["Symbol not tradeable on Alpaca or Coinbase"],
         price: Number.isFinite(price) ? price : null,
         bookScore: null, bookSignal: null, bookReasons: null,
         volumeSpike: null, volumeRatio: null,
         meta: { strategy: "divergence" },
       });
-      res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
+      res.status(200).json({ status: "skipped_no_exchange", symbol });
       return;
     }
     broker = resolved;

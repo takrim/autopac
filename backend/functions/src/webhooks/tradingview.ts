@@ -13,6 +13,7 @@ import { calculateIndicators } from "../services/indicators";
 import { getBroker } from "../brokers";
 import { fetchOrderBook, scoreBook, normalizeBookSymbol } from "../services/orderbook";
 import { getActiveStrategy } from "../services/strategyConfig";
+import { resolveExchangeForSymbol } from "../services/rsiDip";
 import { runBulltrendDivergence, runBeartrendLiquidate } from "../services/strategies/divergence";
 
 const db = getFirestore();
@@ -660,22 +661,24 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
   let bulltrendBroker: "alpaca" | "coinbase";
   try {
     tradingConfig = await getTradingConfig();
-    const resolved = getBrokerForSymbol(tradingConfig, symbol);
+    // Route by asset availability: trade on Alpaca if the ticker exists there,
+    // otherwise fall back to Coinbase. Skip only if neither carries it.
+    const resolved = await resolveExchangeForSymbol(symbol);
     if (!resolved) {
-      logger.info("[BULLTREND] Symbol not in any broker allowlist", { symbol });
-      await sendTelegramMessage(`🚫 *Bulltrend skip* ${symbol}\nSymbol not in any broker allowlist`).catch(() => {});
+      logger.info("[BULLTREND] Symbol not tradeable on Alpaca or Coinbase", { symbol });
+      await sendTelegramMessage(`🚫 *Bulltrend skip* ${symbol}\nNot tradeable on Alpaca or Coinbase`).catch(() => {});
       await logDecision({
         handler: "bulltrend",
         symbol,
         payload: { bullish_trend: bullishTrend, price, volume, time },
         decision: "skipped",
-        reasons: ["Symbol not in any broker allowlist"],
+        reasons: ["Symbol not tradeable on Alpaca or Coinbase"],
         broker: tradingConfig.ACTIVE_BROKER,
         price: !isNaN(price) ? price : null,
         bookScore: null, bookSignal: null, bookReasons: null,
         volumeSpike: null, volumeRatio: null,
       });
-      res.status(200).json({ status: "skipped_not_in_allowlist", symbol });
+      res.status(200).json({ status: "skipped_no_exchange", symbol });
       return;
     }
     bulltrendBroker = resolved;
@@ -717,7 +720,7 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
       return;
     }
 
-    // Broker is resolved from the per-symbol allowlist (getBrokerForSymbol).
+    // Broker is resolved by asset availability (Alpaca first, else Coinbase).
     // RSI-dip pre-gate removed: a bullish_trend alert buys directly. Coinbase
     // buys are enabled alongside Alpaca.
 
