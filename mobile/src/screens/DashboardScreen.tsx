@@ -93,8 +93,6 @@ export default function DashboardScreen() {
   const alpacaCash = parseFloat(account?.cash || "0");
   const alpacaBuyingPower = parseFloat(account?.buying_power || "0");
   const lastEquity = parseFloat(account?.last_equity || "0");
-  const dayPl = account ? alpacaEquity - lastEquity : 0;
-  const dayPlPct = account && lastEquity > 0 ? (dayPl / lastEquity) * 100 : 0;
 
   const coinbasePositions = positions.filter(p => p.broker === "coinbase");
   const alpacaPositions = positions.filter(p => p.broker === "alpaca");
@@ -104,6 +102,15 @@ export default function DashboardScreen() {
   );
   const coinbaseEquity = coinbasePositionValue + cashBalance;
   const totalEquity = alpacaEquity + coinbaseEquity;
+
+  // Day P&L is sourced from Alpaca only (current equity vs prior-day close);
+  // Coinbase exposes no prior-day equity baseline. Express the change as a % of
+  // the *previous total* portfolio so the figure shown under the "Total
+  // Portfolio" headline is consistent with that headline. Dividing by Alpaca's
+  // own prior equity (lastEquity) overstated the percentage.
+  const dayPl = account ? alpacaEquity - lastEquity : 0;
+  const prevTotalEquity = totalEquity - dayPl;
+  const dayPlPct = account && prevTotalEquity > 0 ? (dayPl / prevTotalEquity) * 100 : 0;
 
   const totalUnrealizedPl = positions.reduce(
     (sum, p) => sum + parseFloat(p.unrealized_pl || "0"),
