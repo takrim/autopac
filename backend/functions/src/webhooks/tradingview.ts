@@ -7,7 +7,7 @@ import { getWebhookSecret, CONFIG } from "../config";
 import { getTradingConfig, TradingConfig, getActiveBrokerSettings, getBrokerForSymbol } from "../api/config";
 import { sendSignalNotification, sendBulltrendBuyNotification } from "../services/notification";
 import { sendTelegramMessage } from "../services/telegram";
-import { recordRsiDip, getRecentRsiDip, resolveExchangeForSymbol } from "../services/rsiDip";
+import { recordRsiDip, resolveExchangeForSymbol } from "../services/rsiDip";
 import { logAudit } from "../services/audit";
 import { executeOrder } from "../api/trade";
 import { calculateIndicators } from "../services/indicators";
@@ -23,9 +23,6 @@ const db = getFirestore();
 // ---------------------------------------------------------------------------
 const CG_BASE = "https://pro-api.coingecko.com/api/v3";
 export const FORBIDDEN_CATEGORY_REGEX = /\b(defi|meme)\b/i;
-
-// Bulltrend requires a recent rsi_dips entry no older than this window.
-const RSI_DIP_WINDOW_MS = 27 * 60 * 1000;
 
 // Bulltrend-specific initial stop-loss (overrides global STOP_LOSS_PCT for this entry path).
 export const BULLTREND_STOP_LOSS_PCT = 2.0;
@@ -721,58 +718,9 @@ export async function handleBulltrendWebhook(req: Request, res: Response): Promi
       return;
     }
 
-    // --- RSI Dip gate: require a recent dip from the beartrend collector ---
-    const recentDip = await getRecentRsiDip(symbol, RSI_DIP_WINDOW_MS);
-    if (!recentDip) {
-      const windowMin = Math.round(RSI_DIP_WINDOW_MS / 60000);
-      logger.info("[BULLTREND] No recent RSI dip — skipping BUY", { symbol, windowMin });
-      await sendTelegramMessage(`🚫 *Bulltrend skip* ${symbol}\nNo RSI dip in last ${windowMin} min`).catch(() => {});
-      await logDecision({
-        handler: "bulltrend",
-        symbol,
-        payload: { bullish_trend: bullishTrend, price, volume, time },
-        decision: "skipped",
-        reasons: [`No RSI dip recorded in last ${windowMin} min`],
-        broker: bulltrendBroker,
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-        meta: { bulltrendId: bulltrendDoc.id, dipWindowMs: RSI_DIP_WINDOW_MS },
-      });
-      res.json({ status: "stored_no_recent_dip", id: bulltrendDoc.id, symbol });
-      return;
-    }
-    const dipAgeSec = Math.round(recentDip.ageMs / 1000);
-    logger.info("[BULLTREND] Recent RSI dip found", { symbol, dipAgeSec, dipPrice: recentDip.data.price, dipRsi: recentDip.data.rsi });
-
-    // --- Route by the dip doc's stamped exchange (per-symbol exchange routing).
-    // Legacy dip docs without `exchange` are defaulted to "coinbase" by getRecentRsiDip.
-    if (recentDip.data.exchange !== bulltrendBroker) {
-      logger.info("[BULLTREND] Routing by stored dip exchange", {
-        symbol, allowlistBroker: bulltrendBroker, dipBroker: recentDip.data.exchange,
-      });
-    }
-    bulltrendBroker = recentDip.data.exchange;
-
-    // --- Coinbase buys temporarily disabled (Alpaca-only mode) ---
-    if (bulltrendBroker === "coinbase") {
-      logger.info("[BULLTREND] Coinbase buys disabled — skipping", { symbol });
-      await sendTelegramMessage(`🚫 *Bulltrend skip* ${symbol}\nCoinbase buys are temporarily disabled (Alpaca-only mode)`).catch(() => {});
-      await logDecision({
-        handler: "bulltrend",
-        symbol,
-        payload: { bullish_trend: bullishTrend, price, volume, time },
-        decision: "skipped",
-        reasons: ["Coinbase buys temporarily disabled (Alpaca-only mode)"],
-        broker: bulltrendBroker,
-        price: !isNaN(price) ? price : null,
-        bookScore: null, bookSignal: null, bookReasons: null,
-        volumeSpike: null, volumeRatio: null,
-        meta: { bulltrendId: bulltrendDoc.id, dipBroker: recentDip.data.exchange },
-      });
-      res.json({ status: "stored", id: bulltrendDoc.id, symbol, coinbaseDisabled: true });
-      return;
-    }
+    // Broker is resolved from the per-symbol allowlist (getBrokerForSymbol).
+    // RSI-dip pre-gate removed: a bullish_trend alert buys directly. Coinbase
+    // buys are enabled alongside Alpaca.
 
     // --- Pyramid guard: block duplicate buy if position already exists ---
     if (!tradingConfig.ORDER_PYRAMID) {

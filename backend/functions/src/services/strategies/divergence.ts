@@ -123,21 +123,7 @@ export async function runBulltrendDivergence(req: Request, res: Response): Promi
     createdAt: FieldValue.serverTimestamp(),
   });
 
-  // ── Coinbase buys globally disabled ───────────────────────────────────
-  if (broker === "coinbase") {
-    await sendTelegramMessage(`🚫 *Bull divergence skip* ${symbol}\nCoinbase buys are temporarily disabled`).catch(() => {});
-    await logDecision({
-      handler: "bulltrend", symbol,
-      payload: { price, time, source: "divergence" },
-      decision: "skipped", reasons: ["Coinbase buys disabled (Alpaca-only mode)"],
-      broker, price: Number.isFinite(price) ? price : null,
-      bookScore: null, bookSignal: null, bookReasons: null,
-      volumeSpike: null, volumeRatio: null,
-      meta: { strategy: "divergence", bulltrendId: bulltrendDoc.id },
-    });
-    res.json({ status: "stored", id: bulltrendDoc.id, symbol, coinbaseDisabled: true });
-    return;
-  }
+  // Coinbase buys are enabled alongside Alpaca (no broker-disable gate).
 
   // ── Pyramid guard ─────────────────────────────────────────────────────
   if (!tradingConfig.ORDER_PYRAMID) {
