@@ -21,6 +21,7 @@ import { sendBurstBuyNotification } from "./notification";
 import { logDecisions, DecisionLogRecord, DecisionCheck } from "./decisionLog";
 import { loadSymbolCache, addToSymbolCache, ZERO_CANDLES_SKIP_REGEX } from "./burstScannerCache";
 import { normalizeBookSymbol } from "./orderbook";
+import { rsiSeries as rsiSeriesFn, emaSeries as emaSeriesFn } from "./ta";
 import { Signal } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -334,46 +335,6 @@ const DIVERGENCE_LOOKBACK_BARS = 30;
 const SWING_LEFT_RIGHT         = 2;     // bars on each side that must be higher
 
 /**
- * Wilder RSI-14 series over close prices (oldest → newest).
- * Returns array aligned to closes; values before warmup are NaN.
- */
-function calculateRSISeries(closes: number[], period = RSI_PERIOD): number[] {
-  const out: number[] = new Array(closes.length).fill(NaN);
-  if (closes.length < period + 1) return out;
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= period; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff; else losses -= diff;
-  }
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
-  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  for (let i = period + 1; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    avgGain = (avgGain * (period - 1) + (diff > 0 ? diff : 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
-    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-  return out;
-}
-
-/** Exponential moving average; values before warmup are NaN. SMA seed over `period`. */
-function calcEma(closes: number[], period: number): number[] {
-  const out: number[] = new Array(closes.length).fill(NaN);
-  if (closes.length < period) return out;
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += closes[i];
-  let ema = sum / period;
-  out[period - 1] = ema;
-  const k = 2 / (period + 1);
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-    out[i] = ema;
-  }
-  return out;
-}
-
-/**
  * Find indices of local swing lows in `values`. A swing low at index i means
  * v[i] is the strict minimum across [i-leftRight .. i+leftRight].
  * Returns indices in ascending order.
@@ -500,7 +461,7 @@ export async function checkEntrySignal(
 
   // Try 3m first
   if (closes.length >= RSI_PERIOD + 1) {
-    rsiSeries = calculateRSISeries(closes);
+    rsiSeries = rsiSeriesFn(closes);
     const maSeries = sma(rsiSeries, RSI_MA_PERIOD);
     const last = closes.length - 1;
     const r = rsiSeries[last];
@@ -518,7 +479,7 @@ export async function checkEntrySignal(
     const fiveMin = await coinbaseBroker.getCandles(productId, "FIVE_MINUTE", 100);
     const fiveCloses = fiveMin.map(c => c.close);
     if (fiveCloses.length >= RSI_PERIOD + 1) {
-      const series = calculateRSISeries(fiveCloses);
+      const series = rsiSeriesFn(fiveCloses);
       const maSeries = sma(series, RSI_MA_PERIOD);
       const last = fiveCloses.length - 1;
       const r = series[last];
@@ -541,7 +502,7 @@ export async function checkEntrySignal(
   let lastHourClose = -1;
   if (hourly.length >= TREND_EMA_PERIOD) {
     const hourlyCloses = hourly.map(c => c.close);
-    const emaSeries = calcEma(hourlyCloses, TREND_EMA_PERIOD);
+    const emaSeries = emaSeriesFn(hourlyCloses, TREND_EMA_PERIOD);
     ema200 = emaSeries[emaSeries.length - 1];
     lastHourClose = hourlyCloses[hourlyCloses.length - 1];
     aboveTrend = Number.isFinite(ema200) && lastHourClose > ema200;

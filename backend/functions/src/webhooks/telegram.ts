@@ -9,6 +9,8 @@ import { BacktestRunDoc } from "../types";
 import { fetchOrderBook, scoreBook, BookLevel } from "../services/orderbook";
 import { placeManualOrder } from "../api/trade"
 import { runNewsMonitor } from "../services/newsMonitor";
+import { runCryptoMonitor } from "../services/cryptoMonitor";
+import { loadWatchlist } from "../services/cryptoMonitor/watchlist";
 import { queryDecisions, DecisionOutcome } from "../services/decisionLog";
 import { runCgBacktest, CgBacktestInput, CgBacktestResult } from "../services/cgBacktest";
 import { runDecisionAnalyzer } from "../services/decisionAnalyzer";
@@ -668,6 +670,26 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         await replyTo(chatId, `❌ Trend analysis failed: ${String(trendErr).slice(0, 200)}`);
       }
       res.json({ ok: true });
+    } else if (lower === "/scan" || lower.startsWith("/scan ")) {
+      const arg = text.trim().split(/\s+/)[1];
+      await replyTo(chatId, `⏳ Scanning${arg ? ` ${arg.toUpperCase()}` : " watchlist"}...`);
+      try {
+        const result = await runCryptoMonitor({ onlySymbol: arg, notify: false });
+        const header = `🔎 Crypto scan — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} alert${result.alerts !== 1 ? "s" : ""}`;
+        await replyTo(chatId, `${header}\n\n${result.lines.join("\n") || "(no coins)"}`);
+      } catch (scanErr) {
+        logger.error("[TG_WEBHOOK] /scan failed", { error: String(scanErr) });
+        await replyTo(chatId, `❌ Scan failed: ${String(scanErr).slice(0, 200)}`);
+      }
+      res.json({ ok: true });
+    } else if (lower === "/watchlist") {
+      try {
+        const coins = await loadWatchlist();
+        await replyTo(chatId, `📋 Watchlist (${coins.length}):\n${coins.map(c => `• ${c.symbol} (${c.coinbaseProductId})`).join("\n")}`);
+      } catch (wlErr) {
+        await replyTo(chatId, `❌ Watchlist read failed: ${String(wlErr).slice(0, 200)}`);
+      }
+      res.json({ ok: true });
     } else if (lower === "/cgbacktest" || lower.startsWith("/cgbacktest ")) {
       const raw = text.slice("/cgbacktest".length).trim();
       await handleCgBacktestCommand(chatId, raw).catch((err) =>
@@ -877,6 +899,13 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "*/strategy* <id>",
         "  Show detailed description and parameters for a strategy.",
         "  Example: /strategy scalpx",
+        "",
+        "*/scan* [symbol]",
+        "  Run the crypto buy-signal monitor now (whole watchlist, or one coin).",
+        "  Example: /scan SOL",
+        "",
+        "*/watchlist*",
+        "  Show the coins the monitor tracks.",
         "",
         "━━━ ℹ️ General ━━━",
         "",

@@ -67,7 +67,7 @@ const NAME_MAP: Record<string, string> = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function scoreSentiment(title: string): "bullish" | "bearish" | "neutral" {
+export function scoreSentiment(title: string): "bullish" | "bearish" | "neutral" {
   const lower = title.toLowerCase();
   const bullish = BULLISH_KEYWORDS.filter(k => lower.includes(k)).length;
   const bearish = BEARISH_KEYWORDS.filter(k => lower.includes(k)).length;
@@ -76,14 +76,14 @@ function scoreSentiment(title: string): "bullish" | "bearish" | "neutral" {
   return "neutral";
 }
 
-interface NewsArticle {
+export interface NewsArticle {
   title: string;
   source: string;
   publishedAt: number;
   sentiment: "bullish" | "bearish" | "neutral";
 }
 
-async function fetchNewsForSymbol(symbol: string): Promise<NewsArticle[]> {
+export async function fetchNewsForSymbol(symbol: string): Promise<NewsArticle[]> {
   // Strip quote suffix: BTC-USD → BTC, BTCUSD → BTC
   const base = symbol.replace(/-USD.*$/, "").replace(/USD[CT]?$/i, "");
   const name = NAME_MAP[base.toUpperCase()] || base;

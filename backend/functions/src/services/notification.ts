@@ -216,6 +216,27 @@ async function sendPushToAllTokens(
 }
 
 /**
+ * Push fired by the crypto monitor when a coin scores into a buy category.
+ * Notify-only — does not place any order.
+ * Example body: "STRONG BUY: SOL-USD (score 23)"
+ */
+export async function sendCryptoBuyAlertNotification(
+  symbol: string,
+  category: "STRONG_BUY" | "WATCHLIST",
+  total: number,
+  reasons: string[]
+): Promise<void> {
+  const label = category === "STRONG_BUY" ? "🚀 STRONG BUY" : "👀 WATCHLIST";
+  const top = reasons.slice(0, 3).join(" · ");
+  await sendPushToAllTokens(
+    label,
+    `${symbol} (score ${total})${top ? ` — ${top}` : ""}`,
+    { type: "CRYPTO_BUY_ALERT", symbol, category, score: String(total) },
+    "CRYPTO_BUY_ALERT"
+  );
+}
+
+/**
  * Push fired by burstScanner when an auto-buy succeeds on Coinbase.
  * Example body: "Burst BUY: BTC-USD @ $43,210.55"
  */

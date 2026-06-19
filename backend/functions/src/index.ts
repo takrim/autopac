@@ -1,5 +1,7 @@
 import { initializeApp } from "firebase-admin/app";
 import { onRequest } from "firebase-functions/v2/https";
+import { onSchedule } from "firebase-functions/v2/scheduler";
+import { logger } from "firebase-functions/v2";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -34,6 +36,8 @@ import {
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
 import { handleTelegramWebhook } from "./webhooks/telegram";
+import { sendTelegramMessage } from "./services/telegram";
+import { runCryptoMonitor } from "./services/cryptoMonitor";
 
 // --- Webhook App (no auth — uses shared secret) ---
 const webhookApp = express();
@@ -122,4 +126,26 @@ export const tgbot = onRequest(
     secrets: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "COINBASE_API_KEY", "COINBASE_API_SECRET", "GEMINI_API_KEY", "RESEND_API_KEY", "COINGECKO_API_KEY"],
   },
   tgbotApp
+);
+
+// Crypto buy-signal monitor — every 15 minutes.
+// Scores the watchlist on fundamental + news + technical factors and emits
+// Telegram/push buy alerts (notify-only; never places an order).
+export const cryptoMonitor = onSchedule(
+  {
+    region: "us-central1",
+    schedule: "every 15 minutes",
+    timeoutSeconds: 300,
+    maxInstances: 1,
+    secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "COINGECKO_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+  },
+  async () => {
+    try {
+      await runCryptoMonitor();
+    } catch (err) {
+      const msg = String(err);
+      logger.error("[CRYPTO_MONITOR] Scheduled run failed", { error: msg });
+      await sendTelegramMessage(`⚠️ Crypto Monitor FAILED:\n${msg}`).catch(() => {});
+    }
+  }
 );
