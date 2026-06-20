@@ -36,3 +36,28 @@ export async function handleListCryptoAlerts(req: Request, res: Response): Promi
     res.status(500).json({ error: String(err) });
   }
 }
+
+/**
+ * GET /monitor/last-run — the most recent crypto-monitor run snapshot: the
+ * scored coins (sorted best-first) each with friendly + full analysis text.
+ */
+export async function handleGetLastRun(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const snap = await db.collection("monitor_runs").orderBy("runAt", "desc").limit(1).get();
+    if (snap.empty) {
+      res.json({ run: null });
+      return;
+    }
+    const doc = snap.docs[0];
+    res.json({ run: { id: doc.id, ...doc.data() } });
+  } catch (err) {
+    logger.error("[API] Last run error", { error: String(err) });
+    res.status(500).json({ error: String(err) });
+  }
+}

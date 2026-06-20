@@ -6,8 +6,7 @@ import { Text } from "react-native";
 import { useAuth } from "../context/AuthContext";
 import LoginScreen from "../screens/LoginScreen";
 import DashboardScreen from "../screens/DashboardScreen";
-import SignalInboxScreen from "../screens/SignalInboxScreen";
-import SignalDetailScreen from "../screens/SignalDetailScreen";
+import LastRunScreen from "../screens/LastRunScreen";
 import PositionsScreen from "../screens/PositionsScreen";
 import OrdersScreen from "../screens/OrdersScreen";
 import SettingsScreen from "../screens/SettingsScreen";
@@ -22,23 +21,6 @@ const screenOptions = {
   headerTintColor: "#fff",
   headerTitleStyle: { fontWeight: "bold" as const },
 };
-
-function SignalsStack() {
-  return (
-    <Stack.Navigator screenOptions={screenOptions}>
-      <Stack.Screen
-        name="SignalInbox"
-        component={SignalInboxScreen}
-        options={{ title: "Signals" }}
-      />
-      <Stack.Screen
-        name="SignalDetail"
-        component={SignalDetailScreen}
-        options={{ title: "Signal Detail" }}
-      />
-    </Stack.Navigator>
-  );
-}
 
 function PositionsStack() {
   return (
@@ -90,10 +72,12 @@ function MainTabs() {
       />
       */}
       <Tab.Screen
-        name="SignalsTab"
-        component={SignalsStack}
+        name="LastRunTab"
+        component={LastRunScreen}
         options={{
-          title: "Signals",
+          title: "Monitor",
+          ...screenOptions,
+          headerShown: true,
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 20 }}>📊</Text>,
         }}
       />

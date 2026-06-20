@@ -25,7 +25,7 @@ import {
   fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
 import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
-import { formatBreakdown, formatBeginnerBreakdown } from "./format";
+import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "./format";
 
 const db = getFirestore();
 const METRICS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -113,6 +113,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   ]);
 
   const lines: string[] = [];
+  const runCoins: Record<string, unknown>[] = [];
   let alerts = 0;
 
   for (const coin of watchlist) {
@@ -146,6 +147,20 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
         expiresAt: Timestamp.fromMillis(Date.now() + METRICS_TTL_MS),
       });
 
+      // Capture per-coin result for the mobile "last run" view.
+      runCoins.push({
+        symbol: coin.symbol,
+        productId: coin.coinbaseProductId,
+        price,
+        category: result.category,
+        total: result.total,
+        fundamental: result.fundamental,
+        news: result.news,
+        technical: result.technical,
+        friendly: toPlainText(formatBeginnerBreakdown(coin, result, price)),
+        full: toPlainText(formatBreakdown(coin, result, price)),
+      });
+
       if (forceBuy) {
         await autoBuy(coin, result, price, notify, tradingConfig, true).catch(err =>
           logger.error("[CRYPTO_MONITOR] forced buy failed", { symbol: coin.symbol, error: String(err) })
@@ -159,6 +174,20 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
     } catch (err) {
       logger.warn("[CRYPTO_MONITOR] coin scoring failed", { symbol: coin.symbol, error: String(err) });
     }
+  }
+
+  // Persist the run snapshot for the mobile "last run" view — full universe runs only.
+  if (!dryRun && !opts?.onlySymbol && runCoins.length > 0) {
+    const order: Record<string, number> = { STRONG_BUY: 0, WATCHLIST: 1, AVOID: 2 };
+    runCoins.sort((a, b) =>
+      (order[a.category as string] - order[b.category as string]) || ((b.total as number) - (a.total as number))
+    );
+    await db.collection("monitor_runs").add({
+      runAt: FieldValue.serverTimestamp(),
+      count: runCoins.length,
+      coins: runCoins,
+      expiresAt: Timestamp.fromMillis(Date.now() + METRICS_TTL_MS),
+    }).catch(err => logger.warn("[CRYPTO_MONITOR] monitor_runs write failed", { error: String(err) }));
   }
 
   logger.info("[CRYPTO_MONITOR] run complete", { scanned: watchlist.length, alerts });

@@ -35,7 +35,7 @@ import {
 } from "./api/alpaca";
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
-import { handleListCryptoAlerts } from "./api/crypto";
+import { handleListCryptoAlerts, handleGetLastRun } from "./api/crypto";
 import { handleTelegramWebhook } from "./webhooks/telegram";
 import { sendTelegramMessage } from "./services/telegram";
 import { runCryptoMonitor } from "./services/cryptoMonitor";
@@ -80,6 +80,7 @@ apiApp.get("/config", handleGetConfig);
 apiApp.patch("/config", handleUpdateConfig);
 apiApp.get("/trending", handleGetTrending);
 apiApp.get("/crypto-alerts", handleListCryptoAlerts);
+apiApp.get("/monitor/last-run", handleGetLastRun);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.

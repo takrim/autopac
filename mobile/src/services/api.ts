@@ -405,3 +405,32 @@ export interface BookAnalysis {
 export async function fetchBookAnalysis(symbol: string): Promise<BookAnalysis> {
   return apiRequest<BookAnalysis>(`/book/${encodeURIComponent(symbol)}`);
 }
+
+// --- Crypto Monitor (last run) ---
+
+export type MonitorCategory = "STRONG_BUY" | "WATCHLIST" | "AVOID";
+
+export interface MonitorCoin {
+  symbol: string;
+  productId: string;
+  price: number;
+  category: MonitorCategory;
+  total: number;
+  fundamental: number;
+  news: number;
+  technical: number;
+  friendly: string;
+  full: string;
+}
+
+export interface MonitorRun {
+  id: string;
+  runAt?: { _seconds: number; _nanoseconds: number } | null;
+  count: number;
+  coins: MonitorCoin[];
+}
+
+export async function fetchLastRun(): Promise<MonitorRun | null> {
+  const data = await apiRequest<{ run: MonitorRun | null }>("/monitor/last-run");
+  return data.run;
+}

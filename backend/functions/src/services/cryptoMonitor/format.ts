@@ -155,3 +155,8 @@ function clip(s: string, max = 140): string {
   const t = s.trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
+
+/** Strip the lightweight Telegram markdown (*bold*, _italic_) for plain-text UIs. */
+export function toPlainText(s: string): string {
+  return s.replace(/[*_]/g, "");
+}
