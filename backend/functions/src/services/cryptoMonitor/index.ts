@@ -46,6 +46,16 @@ export async function resolveWatchlist(): Promise<WatchCoin[]> {
   return fetchMoversWatchlist();
 }
 
+/** Resolve a single ticker to a WatchCoin (any coin, not just the universe). */
+async function resolveCoinForSymbol(symbol: string): Promise<WatchCoin | null> {
+  const want = symbol.toUpperCase().replace(/-USD.*$/, "");
+  const known = DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === symbol.toUpperCase());
+  if (known) return known;
+  const cgId = await searchCoinGeckoId(want);
+  if (!cgId) return null;
+  return { symbol: want, coinbaseProductId: `${want}-USD`, coingeckoId: cgId, defillama: DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want)?.defillama };
+}
+
 /** Collect + score one coin (no persistence). Shared by the run loop and /coin. */
 async function collectAndScore(
   coin: WatchCoin,
@@ -87,12 +97,12 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   const notify = opts?.notify ?? true;
   const dryRun = opts?.dryRun ?? false;
 
-  let watchlist = await resolveWatchlist();
+  let watchlist: WatchCoin[];
   if (opts?.onlySymbol) {
-    const want = opts.onlySymbol.toUpperCase().replace(/-USD.*$/, "");
-    watchlist = watchlist.filter(
-      c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === opts.onlySymbol!.toUpperCase()
-    );
+    const coin = await resolveCoinForSymbol(opts.onlySymbol);
+    watchlist = coin ? [coin] : [];
+  } else {
+    watchlist = await resolveWatchlist();
   }
 
   const tradingConfig = await getTradingConfig();
@@ -151,13 +161,8 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
  * otherwise resolves the CoinGecko id by symbol. `detailed` returns the technical
  * check-by-check view; the default is the beginner-friendly summary. */
 export async function explainCoin(symbol: string, detailed = false): Promise<string | null> {
-  const want = symbol.toUpperCase().replace(/-USD.*$/, "");
-  let coin = DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === symbol.toUpperCase());
-  if (!coin) {
-    const cgId = await searchCoinGeckoId(want);
-    if (!cgId) return null;
-    coin = { symbol: want, coinbaseProductId: `${want}-USD`, coingeckoId: cgId, defillama: DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want)?.defillama };
-  }
+  const coin = await resolveCoinForSymbol(symbol);
+  if (!coin) return null;
 
   const [marketRows, newsBySymbol] = await Promise.all([fetchMarketRows([coin.coingeckoId]), fetchNewsDataHeadlines([coin.symbol])]);
   const { result, price } = await collectAndScore(coin, marketRows.get(coin.coingeckoId), newsBySymbol);

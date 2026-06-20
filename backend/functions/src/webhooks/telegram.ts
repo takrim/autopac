@@ -670,12 +670,21 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
       }
       res.json({ ok: true });
     } else if (lower === "/scan" || lower.startsWith("/scan ")) {
-      const arg = text.trim().split(/\s+/)[1];
-      await replyTo(chatId, `⏳ Scanning${arg ? ` ${arg.toUpperCase()}` : " watchlist"}...`);
+      const parts = text.trim().split(/\s+/);
+      const arg = parts[1];
+      const live = (parts[2] || "").toLowerCase() === "live";
+      if (live && !arg) {
+        await replyTo(chatId, "⚠️ Live mode needs a symbol (single coin only): /scan SOL live");
+        res.json({ ok: true });
+        return;
+      }
+      await replyTo(chatId, `⏳ ${live ? "LIVE run" : "Scanning"}${arg ? ` ${arg.toUpperCase()}` : " watchlist"}...`);
       try {
-        // dry-run: preview only — no writes, no alerts, no auto-buy
-        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: true });
-        const header = `🔎 Crypto scan (preview) — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} would-alert`;
+        // dry-run = preview (no writes/alerts/buy). live = real path (may auto-buy).
+        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: !live });
+        const header = live
+          ? `🟢 LIVE run — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} alert(s). Writes metrics/alerts; auto-buys if STRONG_BUY & AUTO_APPROVE.`
+          : `🔎 Crypto scan (preview) — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} would-alert`;
         await replyTo(chatId, `${header}\n\n${result.lines.join("\n") || "(no coins)"}`);
       } catch (scanErr) {
         logger.error("[TG_WEBHOOK] /scan failed", { error: String(scanErr) });
@@ -917,9 +926,10 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "  Show detailed description and parameters for a strategy.",
         "  Example: /strategy scalpx",
         "",
-        "*/scan* [symbol]",
-        "  Run the crypto buy-signal monitor now (whole watchlist, or one coin).",
-        "  Example: /scan SOL",
+        "*/scan* [symbol] [live]",
+        "  Preview the monitor now (whole universe, or one coin). Add 'live'",
+        "  (single coin only) to run the REAL path — writes + auto-buys if",
+        "  STRONG_BUY & AUTO_APPROVE.  Example: /scan SOL   ·   /scan SOL live",
         "",
         "*/coin* <symbol> [full]",
         "  Plain-English buy analysis for one coin. Add 'full' for the numbers.",
