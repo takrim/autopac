@@ -1237,6 +1237,35 @@ export class CoinbaseBroker implements IBroker {
   }
 
   /**
+   * Fetch the top 24h losers listed on Coinbase (SPOT USD pairs), most-negative
+   * first. Mirror of getMarketGainers — oversold coins can be dip-buy candidates.
+   */
+  async getMarketLosers(limit = 50): Promise<{
+    topLosers: Array<{ productId: string; symbol: string; change24h: number; price: number; volumeUsd: number }>;
+  }> {
+    const { ok, data } = await this.request("GET", "/products?product_type=SPOT&limit=250");
+    if (!ok || !Array.isArray(data?.products)) return { topLosers: [] };
+
+    const usdProducts = (data.products as Array<Record<string, string>>).filter(
+      p => p.quote_currency_id === "USD" && p.status === "online"
+    );
+
+    const topLosers = usdProducts
+      .map(p => ({
+        productId: p.product_id,
+        symbol: p.base_currency_id,
+        change24h: parseFloat(p.price_percentage_change_24h ?? "0"),
+        price: parseFloat(p.price ?? "0"),
+        volumeUsd: parseFloat(p.volume_24h ?? "0") * parseFloat(p.price ?? "0"),
+      }))
+      .filter(p => p.change24h < 0)
+      .sort((a, b) => a.change24h - b.change24h)
+      .slice(0, limit);
+
+    return { topLosers };
+  }
+
+  /**
    * Fetch the top-N tradeable Coinbase SPOT pairs by 24h USD volume.
    * USD-quoted only — USDC pairs are duplicates of USD pairs (e.g. BTC-USDC
    * vs BTC-USD) and would crowd out distinct symbols from the universe.

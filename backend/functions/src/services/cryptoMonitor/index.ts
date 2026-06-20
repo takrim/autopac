@@ -22,7 +22,7 @@ import { Signal } from "../../types";
 import { loadWatchlistOverride, WatchCoin, DEFAULT_WATCHLIST } from "./watchlist";
 import {
   fetchMarketRows, fetch7dAvgVolume, fetchHourlyCandles,
-  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchGainersWatchlist, searchCoinGeckoId, CgMarketRow,
+  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
 import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
 import { formatBreakdown } from "./format";
@@ -39,11 +39,11 @@ export interface MonitorRunResult {
   lines: string[];
 }
 
-/** The active universe: manual Firestore override, else dynamic gainers (else defaults). */
+/** The active universe: manual Firestore override, else Coinbase top movers (gainers + losers). */
 export async function resolveWatchlist(): Promise<WatchCoin[]> {
   const override = await loadWatchlistOverride();
   if (override) return override;
-  return fetchGainersWatchlist();
+  return fetchMoversWatchlist();
 }
 
 /** Collect + score one coin (no persistence). Shared by the run loop and /coin. */

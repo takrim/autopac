@@ -8,9 +8,10 @@ import { getBroker } from "../../brokers";
 import { CoinbaseBroker } from "../../brokers/coinbase";
 import { fetchNewsForSymbol } from "../newsMonitor";
 import { sendTelegramMessage } from "../telegram";
-import { cgFetchCategories, FORBIDDEN_CATEGORY_REGEX } from "../../webhooks/tradingview";
+import { cgFetchCategories } from "../../webhooks/tradingview";
 import { Candle, NewsHeadline } from "./scoring";
 import { DefiLlamaRef, WatchCoin, DEFAULT_WATCHLIST } from "./watchlist";
+import { isUniverseEligible } from "./universe";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -114,9 +115,9 @@ export async function fetchHourlyCandles(productId: string): Promise<Candle[]> {
 
 // ── Dynamic gainers universe ─────────────────────────────────────────────────
 
-const GAINERS_LIMIT = 25; // how many coins the monitor scores per run (top 20–30)
-const GAINERS_CANDIDATES = 50; // Coinbase gainers to consider before category filtering
-const STABLE_SYMBOLS = new Set(["USDT", "USDC", "DAI", "USDE", "FDUSD", "TUSD", "USDD", "PYUSD", "USDS", "BUSD", "GUSD", "USD"]);
+const GAINERS_SLOT = 15; // up to this many top gainers in the universe
+const LOSERS_SLOT = 10; // up to this many top losers (oversold dip candidates)
+const MOVERS_CANDIDATES = 50; // Coinbase movers to consider (each side) before filtering
 
 // CoinGecko category/id lookups change slowly — cache per symbol for 24h.
 const catCache = new Map<string, { id: string | null; categories: string[] | null; expiresAt: number }>();
@@ -130,33 +131,40 @@ async function resolveCategory(symbol: string): Promise<{ id: string | null; cat
   return res;
 }
 
+type Mover = { productId: string; symbol: string; change24h: number };
+
 /**
- * Build the watchlist from Coinbase's top 24h gainers (native — guaranteed
- * tradable), excluding stablecoins and any coin whose CoinGecko categories match
- * defi/meme. Resolves the CoinGecko id along the way (needed for scoring) and
- * reuses DefiLlama slugs from DEFAULT_WATCHLIST when known. Coins whose category
- * can't be verified are skipped (fail-closed). Returns an empty list (no
- * hardcoded fallback) and alerts via Telegram if the Coinbase feed is down.
+ * Build the watchlist from Coinbase's top 24h movers — gainers and losers
+ * (oversold dip candidates) — excluding stablecoins and any coin whose CoinGecko
+ * categories match defi/meme. Resolves the CoinGecko id along the way (needed for
+ * scoring) and reuses DefiLlama slugs from DEFAULT_WATCHLIST when known. Coins
+ * whose category can't be verified are skipped (fail-closed). Returns an empty
+ * list (no hardcoded fallback) and alerts via Telegram if the feed is down.
  */
-export async function fetchGainersWatchlist(limit = GAINERS_LIMIT): Promise<WatchCoin[]> {
+export async function fetchMoversWatchlist(): Promise<WatchCoin[]> {
   const broker = getBroker("coinbase") as CoinbaseBroker;
 
   const MAX_ATTEMPTS = 3;
-  let gainers: Array<{ productId: string; symbol: string; change24h: number }> = [];
+  let gainers: Mover[] = [];
+  let losers: Mover[] = [];
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await broker.getMarketGainers(GAINERS_CANDIDATES);
-      gainers = res.topGainers ?? [];
+      const [g, l] = await Promise.all([
+        broker.getMarketGainers(MOVERS_CANDIDATES),
+        broker.getMarketLosers(MOVERS_CANDIDATES),
+      ]);
+      gainers = g.topGainers ?? [];
+      losers = l.topLosers ?? [];
     } catch (err) {
-      logger.warn("[CRYPTO_MONITOR] Coinbase gainers attempt failed", { attempt, error: String(err) });
+      logger.warn("[CRYPTO_MONITOR] Coinbase movers attempt failed", { attempt, error: String(err) });
     }
-    if (gainers.length > 0) break;
+    if (gainers.length > 0 || losers.length > 0) break;
     if (attempt < MAX_ATTEMPTS) await sleep(1500 * attempt);
   }
-  if (gainers.length === 0) {
-    logger.error("[CRYPTO_MONITOR] Coinbase gainers feed unavailable after retries");
+  if (gainers.length === 0 && losers.length === 0) {
+    logger.error("[CRYPTO_MONITOR] Coinbase movers feed unavailable after retries");
     await sendTelegramMessage(
-      `⚠️ *Crypto Monitor* — Coinbase gainers feed unavailable after ${MAX_ATTEMPTS} attempts. No universe scored this run.`
+      `⚠️ *Crypto Monitor* — Coinbase movers feed unavailable after ${MAX_ATTEMPTS} attempts. No universe scored this run.`
     ).catch(() => {});
     return [];
   }
@@ -165,21 +173,26 @@ export async function fetchGainersWatchlist(limit = GAINERS_LIMIT): Promise<Watc
     DEFAULT_WATCHLIST.filter(c => c.defillama).map(c => [c.symbol.toUpperCase(), c.defillama!])
   );
 
-  const sorted = gainers
-    .filter(g => g.symbol && !STABLE_SYMBOLS.has(g.symbol.toUpperCase()))
-    .sort((a, b) => b.change24h - a.change24h);
-
   const out: WatchCoin[] = [];
-  for (const g of sorted) {
-    if (out.length >= limit) break;
-    const symbol = g.symbol.toUpperCase();
-    const { id, categories } = await resolveCategory(symbol);
-    if (!id) continue; // need a CoinGecko id to score
-    if (categories === null) continue; // category unverifiable — fail-closed
-    if (categories.some(c => FORBIDDEN_CATEGORY_REGEX.test(c))) continue; // exclude defi/meme
-    out.push({ symbol, coinbaseProductId: g.productId, coingeckoId: id, defillama: defiBySymbol.get(symbol) });
-  }
+  const seen = new Set<string>();
 
+  // Fill up to `slot` coins from `movers` that pass the stablecoin + defi/meme gate.
+  const fillFrom = async (movers: Mover[], slot: number): Promise<void> => {
+    let added = 0;
+    for (const m of movers) {
+      if (added >= slot) break;
+      const symbol = (m.symbol ?? "").toUpperCase();
+      if (!symbol || seen.has(symbol)) continue;
+      const cat = await resolveCategory(symbol);
+      if (!isUniverseEligible(symbol, cat)) continue; // non-stable, has id, non-defi/meme
+      seen.add(symbol);
+      out.push({ symbol, coinbaseProductId: m.productId, coingeckoId: cat.id!, defillama: defiBySymbol.get(symbol) });
+      added++;
+    }
+  };
+
+  await fillFrom(gainers, GAINERS_SLOT);
+  await fillFrom(losers, LOSERS_SLOT);
   return out;
 }
 

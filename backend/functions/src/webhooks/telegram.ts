@@ -700,7 +700,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
     } else if (lower === "/watchlist") {
       try {
         const coins = await resolveWatchlist();
-        await replyTo(chatId, `📋 Universe (${coins.length} — top gainers, Coinbase-tradable):\n${coins.map(c => `• ${c.symbol} (${c.coinbaseProductId})`).join("\n")}`);
+        await replyTo(chatId, `📋 Universe (${coins.length} — Coinbase top movers, non-defi/meme):\n${coins.map(c => `• ${c.symbol} (${c.coinbaseProductId})`).join("\n")}`);
       } catch (wlErr) {
         await replyTo(chatId, `❌ Watchlist read failed: ${String(wlErr).slice(0, 200)}`);
       }
