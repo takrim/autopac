@@ -684,7 +684,8 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
       try {
         // dry-run = preview. live = real path (auto-buys if STRONG_BUY & AUTO_APPROVE).
         // force = real path that buys regardless of score/AUTO_APPROVE (manual test).
-        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: !(live || force), forceBuy: force });
+        // Manual scans don't push alerts or consume the scheduled cooldown.
+        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: !(live || force), forceBuy: force, notify: false, updatesCooldown: false });
         const header = force
           ? `🛒 FORCED BUY test — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}. Placed a real order if pyramid/risk allow.`
           : live

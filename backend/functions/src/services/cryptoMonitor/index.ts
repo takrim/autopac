@@ -24,14 +24,34 @@ import {
   fetchMarketRows, fetch7dAvgVolume, fetchHourlyCandles,
   fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, mergeHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
-import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
+import { scoreCoin, MarketRow, ScoreResult } from "./scoring";
 import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "./format";
+import {
+  evaluateAll, selectAlert, StrategyResult, StrategyConfig, STRATEGY_DEFAULTS, STRATEGY_PRIORITY, AlertType,
+} from "./strategies";
 
 const db = getFirestore();
 const METRICS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-const ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
-const CATEGORY_RANK: Record<Category, number> = { AVOID: 0, WATCHLIST: 1, STRONG_BUY: 2 };
+/** Merge an optional Firestore override (monitor_config/strategies) over the defaults. */
+async function loadStrategyConfig(): Promise<StrategyConfig> {
+  try {
+    const snap = await db.collection("monitor_config").doc("strategies").get();
+    const override = snap.data();
+    if (override) {
+      const defaults = STRATEGY_DEFAULTS as unknown as Record<string, unknown>;
+      const merged: Record<string, unknown> = { ...defaults };
+      for (const [k, v] of Object.entries(override)) {
+        if (v && typeof v === "object" && !Array.isArray(v)) merged[k] = { ...(defaults[k] as object), ...(v as object) };
+        else merged[k] = v;
+      }
+      return merged as unknown as StrategyConfig;
+    }
+  } catch (err) {
+    logger.warn("[CRYPTO_MONITOR] strategy config read failed — using defaults", { error: String(err) });
+  }
+  return STRATEGY_DEFAULTS;
+}
 
 export interface MonitorRunResult {
   scanned: number;
@@ -94,10 +114,12 @@ async function collectAndScore(
  * @param opts.dryRun preview only — no Firestore writes, no alerts, no auto-buy
  *   (used by the Telegram /scan command). The scheduled run uses the default.
  */
-export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: boolean; dryRun?: boolean; forceBuy?: boolean }): Promise<MonitorRunResult> {
+export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: boolean; dryRun?: boolean; forceBuy?: boolean; updatesCooldown?: boolean }): Promise<MonitorRunResult> {
   const notify = opts?.notify ?? true;
   const dryRun = opts?.dryRun ?? false;
   const forceBuy = opts?.forceBuy ?? false;
+  const updatesCooldown = opts?.updatesCooldown ?? true; // scheduled runs consume cooldown; manual /scan does not
+  const strategyCfg = await loadStrategyConfig();
 
   let watchlist: WatchCoin[];
   if (opts?.onlySymbol) {
@@ -148,12 +170,17 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
         expiresAt: Timestamp.fromMillis(Date.now() + METRICS_TTL_MS),
       });
 
+      const { selected, triggered } = selectAlert(evaluateAll(result, strategyCfg));
+
       // Capture per-coin result for the mobile "last run" view.
       runCoins.push({
         symbol: coin.symbol,
         productId: coin.coinbaseProductId,
         price,
-        category: result.category,
+        category: result.category, // diagnostic combined band
+        alertType: selected?.name ?? "NONE",
+        strategies: triggered.map(s => s.name),
+        majorBearish: result.majorBearish,
         total: result.total,
         fundamental: result.fundamental,
         news: result.news,
@@ -170,7 +197,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
         continue;
       }
 
-      const emitted = await reconcileAlert(coin, result, price, notify, tradingConfig);
+      const emitted = await notifyAlert(coin, result, selected, triggered, price, notify, updatesCooldown, strategyCfg.cooldown_hours);
       if (emitted) alerts++;
     } catch (err) {
       logger.warn("[CRYPTO_MONITOR] coin scoring failed", { symbol: coin.symbol, error: String(err) });
@@ -179,9 +206,9 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
 
   // Persist the run snapshot for the mobile "last run" view — full universe runs only.
   if (!dryRun && !opts?.onlySymbol && runCoins.length > 0) {
-    const order: Record<string, number> = { STRONG_BUY: 0, WATCHLIST: 1, AVOID: 2 };
+    const rank = (a: string) => { const i = STRATEGY_PRIORITY.indexOf(a as AlertType); return i < 0 ? 99 : i; };
     runCoins.sort((a, b) =>
-      (order[a.category as string] - order[b.category as string]) || ((b.total as number) - (a.total as number))
+      (rank(a.alertType as string) - rank(b.alertType as string)) || ((b.total as number) - (a.total as number))
     );
     await db.collection("monitor_runs").add({
       runAt: FieldValue.serverTimestamp(),
@@ -208,53 +235,60 @@ export async function explainCoin(symbol: string, detailed = false): Promise<str
   return detailed ? formatBreakdown(coin, result, price) : formatBeginnerBreakdown(coin, result, price);
 }
 
-async function reconcileAlert(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig): Promise<boolean> {
-  const stateRef = db.collection("monitor_state").doc(coin.symbol.toUpperCase());
-  const snap = await stateRef.get();
-  const prev = snap.data() as { lastCategory?: Category; lastAlertAtMs?: number } | undefined;
+/**
+ * Notify the selected strategy alert (notify-only; no auto-buy). Per-strategy
+ * cooldown keyed by `symbol__strategy`. FUNDAMENTAL_WATCH is informational and
+ * never push-notifies (stored only). Manual scans pass updatesCooldown=false so
+ * they don't consume the scheduled notification cooldown.
+ */
+async function notifyAlert(
+  coin: WatchCoin,
+  result: ScoreResult,
+  selected: StrategyResult | null,
+  triggered: StrategyResult[],
+  price: number,
+  notify: boolean,
+  updatesCooldown: boolean,
+  cooldownHours: number,
+): Promise<boolean> {
+  // Only actionable alerts + RISK_BLOCK are notifiable; FUNDAMENTAL_WATCH-only is informational.
+  if (!selected || selected.name === "FUNDAMENTAL_WATCH") return false;
+
   const now = Date.now();
-
-  const isBuy = result.category === "STRONG_BUY" || result.category === "WATCHLIST";
-  if (!isBuy) {
-    await stateRef.set({ lastCategory: result.category }, { merge: true });
-    return false;
-  }
-
-  const prevRank = CATEGORY_RANK[prev?.lastCategory ?? "AVOID"] ?? 0;
-  const upgraded = CATEGORY_RANK[result.category] > prevRank;
-  const cooled = !prev?.lastAlertAtMs || now - prev.lastAlertAtMs >= ALERT_COOLDOWN_MS;
-  if (!upgraded && !cooled) {
-    await stateRef.set({ lastCategory: result.category }, { merge: true });
-    return false;
-  }
+  const cooldownMs = cooldownHours * 60 * 60 * 1000;
+  const stateRef = db.collection("monitor_state").doc(`${coin.symbol.toUpperCase()}__${selected.name}`);
+  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number } | undefined;
+  const cooled = !prev?.lastAlertAtMs || now - prev.lastAlertAtMs >= cooldownMs;
+  if (!cooled) return false;
 
   await db.collection("crypto_alerts").add({
     symbol: coin.symbol,
     productId: coin.coinbaseProductId,
+    alertType: selected.name,
     category: result.category,
+    strategies: triggered.map(s => s.name),
     score: result.total,
     fundamental: result.fundamental,
-    technical: result.technical,
     news: result.news,
-    reasons: result.reasons,
-    risks: result.risks,
+    technical: result.technical,
+    majorBearish: result.majorBearish,
+    reasons: selected.reasons,
+    risks: selected.risks,
+    action: selected.action,
     checks: result.checks,
     price,
     createdAt: FieldValue.serverTimestamp(),
   });
-  await stateRef.set({ lastCategory: result.category, lastAlertAtMs: now }, { merge: true });
 
-  if (notify) {
-    await sendTelegramMessage(formatAlert(coin, result, price)).catch(() => {});
-    if (result.category === "STRONG_BUY") {
-      await sendCryptoBuyAlertNotification(coin.symbol, result.category, result.total, result.reasons).catch(() => {});
-    }
+  if (updatesCooldown) {
+    await stateRef.set({ lastAlertAtMs: now, lastAlertType: selected.name }, { merge: true });
   }
 
-  if (result.category === "STRONG_BUY") {
-    await autoBuy(coin, result, price, notify, cfg).catch(err =>
-      logger.error("[CRYPTO_MONITOR] auto-buy failed", { symbol: coin.symbol, error: String(err) })
-    );
+  if (notify) {
+    await sendTelegramMessage(formatBeginnerBreakdown(coin, result, price)).catch(() => {});
+    if (selected.name !== "RISK_BLOCK") {
+      await sendCryptoBuyAlertNotification(coin.symbol, selected.name, result.total, selected.reasons).catch(() => {});
+    }
   }
   return true;
 }
@@ -323,15 +357,3 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
   }
 }
 
-function formatAlert(coin: WatchCoin, result: ScoreResult, price: number): string {
-  const label = result.category === "STRONG_BUY" ? "🚀 *STRONG BUY*" : "👀 *WATCHLIST*";
-  const priceStr = price >= 1 ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : `$${price.toPrecision(4)}`;
-  const reasons = result.reasons.length ? result.reasons.map(r => `✓ ${r}`).join("\n") : "—";
-  const risks = result.risks.length ? `\n\n*Risks:*\n${result.risks.map(r => `⚠ ${r}`).join("\n")}` : "";
-  return (
-    `${label} — *${coin.symbol}* (${coin.coinbaseProductId})\n` +
-    `Price: ${priceStr}\n` +
-    `Total: ${result.total}/40  (F${result.fundamental} · N${result.news} · T${result.technical})\n\n` +
-    `*Reasons:*\n${reasons}${risks}\n\n_/coin ${coin.symbol} for full breakdown_`
-  );
-}

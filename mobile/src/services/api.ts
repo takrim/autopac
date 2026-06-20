@@ -408,13 +408,18 @@ export async function fetchBookAnalysis(symbol: string): Promise<BookAnalysis> {
 
 // --- Crypto Monitor (last run) ---
 
-export type MonitorCategory = "STRONG_BUY" | "WATCHLIST" | "AVOID";
+export type MonitorAlertType =
+  | "RISK_BLOCK" | "STRONG_BUY" | "PULLBACK_BUY_ZONE" | "BUY_SETUP"
+  | "MOMENTUM_BREAKOUT" | "ACCUMULATION_SETUP" | "FUNDAMENTAL_WATCH" | "NONE";
 
 export interface MonitorCoin {
   symbol: string;
   productId: string;
   price: number;
-  category: MonitorCategory;
+  alertType: MonitorAlertType;
+  strategies?: string[];
+  majorBearish?: boolean;
+  category?: string; // diagnostic combined band
   total: number;
   fundamental: number;
   news: number;

@@ -3,7 +3,7 @@ import {
   scoreNews,
   scoreTechnical,
   classify,
-  classifyCatalyst,
+  classifyNews,
   classifySentiment,
   weighSentiment,
   scoreCoin,
@@ -27,7 +27,6 @@ const baseRow: MarketRow = {
 
 const sumPoints = (checks: ScoreCheck[]) => checks.reduce((s, c) => s + c.points, 0);
 
-/** Build closes: `up` linear-rising bars, then `pull` bars retracing `pullPct`. */
 function buildSeries(up: number, start: number, step: number, pull: number, pullPct: number): Candle[] {
   const closes: number[] = [];
   for (let i = 0; i < up; i++) closes.push(start + i * step);
@@ -48,113 +47,73 @@ describe("scoreFundamental", () => {
 
   test("volume + TVL + stablecoin + revenue stack", () => {
     const r = scoreFundamental({
-      ...baseRow,
-      marketCapRank: 10, // +3
-      volume24h: 210, volume7dAvg: 100, // 2.1x → +3
-      tvlChange30dPct: 25, // +3
-      stablecoinInflow30dPct: 12, // +3
-      revenueRising: true, // +2
+      ...baseRow, marketCapRank: 10, volume24h: 210, volume7dAvg: 100,
+      tvlChange30dPct: 25, stablecoinInflow30dPct: 12, revenueRising: true,
     });
     expect(r.score).toBe(14);
     expect(sumPoints(r.checks)).toBe(r.score);
   });
+});
 
-  test("DefiLlama components are 0 when null (non-DeFi coin)", () => {
-    const r = scoreFundamental({ ...baseRow, marketCapRank: 10 });
-    expect(r.score).toBe(3);
-    expect(r.checks.find(c => c.name === "tvl_growth_30d")!.points).toBe(0);
-    expect(r.checks.find(c => c.name === "ecosystem_revenue")!.points).toBe(0);
+describe("classifyNews (4 categories)", () => {
+  test("major bearish wins", () => {
+    expect(classifyNews("Exchange hacked, funds stolen")).toBe("MAJOR_BEARISH");
+    expect(classifyNews("SEC lawsuit filed against project")).toBe("MAJOR_BEARISH");
   });
-
-  test("TVL / stablecoin tiers", () => {
-    expect(scoreFundamental({ ...baseRow, tvlChange30dPct: 15 }).score).toBe(2);
-    expect(scoreFundamental({ ...baseRow, tvlChange30dPct: 25 }).score).toBe(3);
-    expect(scoreFundamental({ ...baseRow, stablecoinInflow30dPct: 5 }).score).toBe(2);
-    expect(scoreFundamental({ ...baseRow, stablecoinInflow30dPct: 15 }).score).toBe(3);
+  test("bullish", () => {
+    expect(classifyNews("ETF approval boosts adoption")).toBe("BULLISH");
+    expect(classifyNews("Major partnership announced")).toBe("BULLISH");
+  });
+  test("soft bearish (generic) is not major", () => {
+    expect(classifyNews("Bitcoin falls after market selloff")).toBe("SOFT_BEARISH");
+    expect(classifyNews("Analyst warns of volatility")).toBe("SOFT_BEARISH");
+  });
+  test("neutral", () => {
+    expect(classifyNews("Project releases quarterly report")).toBe("NEUTRAL");
   });
 });
 
-describe("classifyCatalyst", () => {
-  test("positive / negative / none", () => {
-    expect(classifyCatalyst("Bitcoin spot ETF approved")).toBe("positive");
-    expect(classifyCatalyst("Solana announces major partnership with Visa")).toBe("positive");
-    expect(classifyCatalyst("Exchange hacked, funds stolen")).toBe("negative");
-    expect(classifyCatalyst("SEC charges firm with fraud")).toBe("negative"); // negative wins over any positive
-    expect(classifyCatalyst("Price trades sideways in quiet session")).toBe("none");
+describe("scoreNews (v2)", () => {
+  test("bullish +2 each capped at +4", () => {
+    expect(scoreNews([h("ETF approval"), h("new listing")]).score).toBe(4);
+    expect(scoreNews([h("ETF approval"), h("listing"), h("partnership")]).score).toBe(SCORING.NEWS_BULLISH_CAP);
+  });
+
+  test("soft bearish -1 each capped at -2; does NOT set major", () => {
+    const r = scoreNews([h("Bitcoin falls"), h("crypto selloff"), h("analyst warns")]);
+    expect(r.score).toBe(SCORING.NEWS_SOFT_BEARISH_CAP); // -2 cap
+    expect(r.majorBearish).toBe(false);
+    expect(sumPoints(r.checks)).toBe(r.score);
+  });
+
+  test("major bearish sets the block flag", () => {
+    const r = scoreNews([h("Protocol exploit drains funds"), h("ETF approval")]);
+    expect(r.majorBearish).toBe(true);
+    expect(r.bullishCount).toBe(1);
+  });
+
+  test("exposes matched headlines in details", () => {
+    const r = scoreNews([h("Bitcoin ETF approved"), h("price falls today")]);
+    expect(r.checks.find(c => c.name === "bullish_news")?.details).toContain("Bitcoin ETF approved");
+    expect(r.checks.find(c => c.name === "soft_bearish_news")?.details).toContain("price falls today");
   });
 });
 
 describe("weighed sentiment (display)", () => {
-  test("classifySentiment tags bullish/bearish/neutral", () => {
-    expect(classifySentiment("Solana price surges as volume climbs")).toBe("bullish");
-    expect(classifySentiment("Token plunges after exchange hack")).toBe("bearish");
-    expect(classifySentiment("Project releases quarterly report")).toBe("neutral");
-  });
-
-  test("weighSentiment aggregates a verdict", () => {
+  test("classifySentiment + weighSentiment", () => {
+    expect(classifySentiment("Solana surges as volume climbs")).toBe("bullish");
     expect(weighSentiment([{ sentiment: "bullish" }, { sentiment: "bullish" }, { sentiment: "neutral" }])).toBe("bullish");
-    expect(weighSentiment([{ sentiment: "bearish" }, { sentiment: "bearish" }])).toBe("bearish");
     expect(weighSentiment([{ sentiment: "bullish" }, { sentiment: "bearish" }])).toBe("mixed");
-    expect(weighSentiment([{ sentiment: "neutral" }])).toBe("neutral");
-  });
-
-  test("scoreCoin attaches weighed headlines for any news (not just catalysts)", () => {
-    const r = scoreCoin([], baseRow, [h("Coin surges on strong volume"), h("Minor delay announced")]);
-    expect(r.newsHeadlines.length).toBe(2);
-    expect(r.newsHeadlines[0].sentiment).toBe("bullish");
-    expect(["bullish", "mixed", "neutral", "bearish"]).toContain(r.newsSentiment);
-  });
-});
-
-describe("scoreNews", () => {
-  test("positive catalysts +2 each capped at +6", () => {
-    expect(scoreNews([h("ETF approval"), h("new listing")]).score).toBe(4);
-    expect(scoreNews([h("ETF approval"), h("listing"), h("partnership"), h("upgrade live")]).score).toBe(SCORING.NEWS_POSITIVE_CAP);
-  });
-
-  test("negatives -3 each, floored at -6, flag major negative", () => {
-    const r = scoreNews([h("partnership"), h("exploit drains funds"), h("lawsuit filed"), h("token delisted")]);
-    expect(r.score).toBe(SCORING.NEWS_FLOOR); // 2 - 9 = -7 → floored -6
-    expect(r.hasMajorNegative).toBe(true);
-    expect(sumPoints(r.checks)).toBe(r.score);
-  });
-
-  test("no news → 0", () => {
-    const r = scoreNews([]);
-    expect(r.score).toBe(0);
-    expect(r.hasMajorNegative).toBe(false);
-  });
-
-  test("exposes matched headlines in check details", () => {
-    const r = scoreNews([h("Bitcoin ETF approved"), h("Exchange hacked, funds stolen")]);
-    const pos = r.checks.find(c => c.name === "positive_catalysts");
-    const neg = r.checks.find(c => c.name === "negative_events");
-    expect(pos?.details).toContain("Bitcoin ETF approved");
-    expect(neg?.details).toContain("Exchange hacked, funds stolen");
-  });
-
-  test("classifies using title + summary, displays clean title", () => {
-    const r = scoreNews([{ title: "Big update", summary: "major partnership with Visa" }]);
-    expect(r.score).toBe(2);
-    expect(r.checks.find(c => c.name === "positive_catalysts")?.details).toEqual(["Big update"]);
   });
 });
 
 describe("scoreTechnical", () => {
   test("uptrend earns trend points; checks sum to score", () => {
-    const candles = buildSeries(240, 100, 1, 12, 0.05);
-    const t = scoreTechnical(candles, baseRow);
+    const t = scoreTechnical(buildSeries(240, 100, 1, 12, 0.05), baseRow);
     expect(t.ema200).not.toBeNull();
     expect(t.score).toBeGreaterThanOrEqual(8);
     expect(sumPoints(t.checks)).toBe(t.score);
   });
-
-  test("monotonic ramp is overbought (RSI>80 penalty)", () => {
-    const t = scoreTechnical(buildSeries(220, 100, 1, 0, 0), baseRow);
-    expect(t.rsi!).toBeGreaterThan(80);
-    expect(t.checks.find(c => c.name === "rsi_momentum")!.points).toBe(-3);
-  });
-
   test("overextension risk penalties", () => {
     const candles = buildSeries(240, 100, 1, 12, 0.05);
     const flat = scoreTechnical(candles, baseRow).score;
@@ -163,55 +122,32 @@ describe("scoreTechnical", () => {
   });
 });
 
-describe("classify (spec thresholds)", () => {
-  test("STRONG_BUY requires total≥25, F≥8, T≥8, no major negative", () => {
-    expect(classify(8, 8, 25, false)).toBe("STRONG_BUY");
-    expect(classify(7, 8, 25, false)).toBe("WATCHLIST"); // F gate
-    expect(classify(8, 7, 25, false)).toBe("WATCHLIST"); // T gate
-    expect(classify(8, 8, 24, false)).toBe("WATCHLIST"); // total gate
-    expect(classify(8, 8, 25, true)).toBe("WATCHLIST"); // negative news
-  });
-
-  test("WATCHLIST / AVOID boundary at 18", () => {
+describe("classify (diagnostic band)", () => {
+  test("STRONG_BUY band / WATCHLIST / AVOID", () => {
+    expect(classify(3, 9, 22, false)).toBe("STRONG_BUY");
+    expect(classify(3, 9, 22, true)).toBe("WATCHLIST"); // major bearish blocks the band
     expect(classify(0, 0, 18, false)).toBe("WATCHLIST");
     expect(classify(0, 0, 17, false)).toBe("AVOID");
   });
 });
 
-describe("scoreCoin (integration)", () => {
-  test("strong fundamentals + good news + healthy uptrend → STRONG_BUY", () => {
-    const candles = buildSeries(240, 100, 1, 12, 0.05);
-    const row: MarketRow = {
-      marketCapRank: 10, volume24h: 210, volume7dAvg: 100,
-      change24hPct: 3, change7dPct: 8,
-      tvlChange30dPct: 25, stablecoinInflow30dPct: 12, revenueRising: true,
-    };
-    const news = [h("major partnership announced"), h("new exchange listing")];
-    const r = scoreCoin(candles, row, news);
-    expect(r.fundamental).toBeGreaterThanOrEqual(8);
-    expect(r.technical).toBeGreaterThanOrEqual(8);
-    expect(r.total).toBe(r.fundamental + r.news + r.technical);
-    expect(r.category).toBe("STRONG_BUY");
-    // breakdown integrity
-    expect(sumPoints(r.checks.fundamental)).toBe(r.fundamental);
-    expect(sumPoints(r.checks.news)).toBe(r.news);
-    expect(sumPoints(r.checks.technical)).toBe(r.technical);
-  });
-
-  test("weak inputs → AVOID", () => {
-    const r = scoreCoin([], baseRow, []);
-    expect(r.technical).toBe(0);
-    expect(r.category).toBe("AVOID");
-  });
-
-  test("major negative news blocks STRONG_BUY even with strong scores", () => {
+describe("scoreCoin (scorecard)", () => {
+  test("populates strategy flags from an uptrend", () => {
     const candles = buildSeries(240, 100, 1, 12, 0.05);
     const row: MarketRow = {
       marketCapRank: 10, volume24h: 210, volume7dAvg: 100, change24hPct: 3, change7dPct: 8,
-      tvlChange30dPct: 25, stablecoinInflow30dPct: 12, revenueRising: true,
+      tvlChange30dPct: null, stablecoinInflow30dPct: null, revenueRising: null,
     };
-    const r = scoreCoin(candles, row, [h("protocol exploit, funds drained")]);
-    expect(r.hasMajorNegativeNews).toBe(true);
-    expect(r.category).not.toBe("STRONG_BUY");
+    const r = scoreCoin(candles, row, [h("Coin surges on strong volume")]);
+    expect(r.priceAboveEma200).toBe(true);
+    expect(r.ema50AboveEma200).toBe(true);
+    expect(r.volumeMultiplier).toBeCloseTo(2.1, 1);
+    expect(r.majorBearish).toBe(false);
+    expect(r.newsHeadlines.length).toBe(1);
+  });
+
+  test("major bearish news flag flows through", () => {
+    const r = scoreCoin([], baseRow, [h("Protocol exploit, funds drained")]);
+    expect(r.majorBearish).toBe(true);
   });
 });

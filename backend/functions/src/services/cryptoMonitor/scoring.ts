@@ -75,40 +75,65 @@ export interface ScoreResult {
   checks: ScoreChecks;
   newsHeadlines: { title: string; sentiment: Sentiment }[]; // weighed recent news (display)
   newsSentiment: NewsSentiment;
+  // --- Scorecard flags consumed by the strategy evaluators ---
+  majorBearish: boolean;
+  bullishCount: number;
+  softBearishCount: number;
+  price: number;
+  priceAboveEma200: boolean;
+  ema50AboveEma200: boolean;
+  ema200Rising: boolean;
+  nearEma20: boolean; // within 2%
+  nearEma50: boolean; // within 3%
+  volumeMultiplier: number | null; // 24h volume / 7d avg
+  change24hPct: number;
+  change7dPct: number;
+  marketCapRank: number | null;
 }
 
-/** Single source of truth for thresholds — spec values (40-pt scale). */
+/** Single source of truth for scoring thresholds. */
 export const SCORING = {
-  STRONG_BUY: { total: 25, fundamental: 8, technical: 8 },
-  WATCHLIST_MIN: 18,
-  NEAR_EMA_PCT: 0.02, // price within 2% of an EMA counts as "near"
-  NEWS_POSITIVE_PER: 2,
-  NEWS_POSITIVE_CAP: 6,
-  NEWS_NEGATIVE_PER: 3,
-  NEWS_FLOOR: -6,
+  WATCHLIST_MIN: 18, // diagnostic combined category only
+  NEAR_EMA20_PCT: 0.02, // price within 2% of EMA20 counts as "near"
+  NEAR_EMA50_PCT: 0.03, // price within 3% of EMA50 counts as "near" (pullback)
+  // News (4-category): bullish +2 each cap +4, soft-bearish -1 each cap -2,
+  // major-bearish sets a block flag (no score penalty — it gates via RISK_BLOCK).
+  NEWS_BULLISH_PER: 2,
+  NEWS_BULLISH_CAP: 4,
+  NEWS_SOFT_BEARISH_PER: -1,
+  NEWS_SOFT_BEARISH_CAP: -2,
   EMA200_RISING_LOOKBACK: 24, // hourly bars (~1 day)
 };
 
-const POSITIVE_CATALYSTS = [
-  "etf", "approval", "approved", "partnership", "partners with", "integration", "integrates",
-  "listing", "lists", "listed", "upgrade", "mainnet", "institutional", "adoption", "invests",
-  "investment", "backed", "grant", "all-time high", "record high", "buyback",
+export type NewsClass = "BULLISH" | "SOFT_BEARISH" | "MAJOR_BEARISH" | "NEUTRAL";
+
+const MAJOR_BEARISH_WORDS = [
+  "hack", "hacked", "exploit", "breach", "stolen", "drained", "bridge exploit", "sec ", "lawsuit", "sued",
+  "subpoena", "criminal investigation", "delist", "delisting", "chain halt", "halt", "halted", "outage",
+  "insolvency", "insolvent", "bankrupt", "bankruptcy", "founder arrest", "arrested", "seized", "token unlock",
+  "rug", "scam", "fraud",
 ];
-const MAJOR_NEGATIVES = [
-  "hack", "hacked", "exploit", "breach", "stolen", "drained", "lawsuit", "sued", "sec ",
-  "subpoena", "investigation", "banned", "delist", "delisted", "outage", "halt", "halted",
-  "vulnerability", "rug", "scam", "fraud", "charges", "lawsuit",
+const BULLISH_NEWS_WORDS = [
+  "etf", "approval", "approved", "partnership", "partners with", "integration", "integrates", "listing",
+  "listed", "lists", "upgrade", "mainnet", "institutional", "adoption", "ecosystem fund", "grant", "backed",
+  "invests", "investment", "buyback", "all-time high", "record high", "revenue growth", "tvl growth",
+];
+const SOFT_BEARISH_WORDS = [
+  "falls", "fall", "selloff", "sell-off", "liquidation", "liquidations", "warns", "warning", "crash",
+  "volatility", "bearish", "decline", "declines", "plunge", "plummet", "dump", "slump", "tumble", "drop",
+  "fear", "downturn", "correction",
 ];
 
-/** Classify a headline as a positive/negative catalyst (negative takes precedence). */
-export function classifyCatalyst(title: string): "positive" | "negative" | "none" {
-  const t = title.toLowerCase();
-  if (MAJOR_NEGATIVES.some(k => t.includes(k))) return "negative";
-  if (POSITIVE_CATALYSTS.some(k => t.includes(k))) return "positive";
-  return "none";
+/** Classify a headline into one of four news categories (major-bearish wins). */
+export function classifyNews(text: string): NewsClass {
+  const t = text.toLowerCase();
+  if (MAJOR_BEARISH_WORDS.some(k => t.includes(k))) return "MAJOR_BEARISH";
+  if (BULLISH_NEWS_WORDS.some(k => t.includes(k))) return "BULLISH";
+  if (SOFT_BEARISH_WORDS.some(k => t.includes(k))) return "SOFT_BEARISH";
+  return "NEUTRAL";
 }
 
-// Broader sentiment lexicon (display "weigh up" — separate from hard catalysts).
+// Broader sentiment lexicon (display "weigh up" — separate from news scoring).
 const BULLISH_WORDS = [
   "surge", "soar", "rally", "jump", "gain", "rise", "rises", "climb", "bull", "bullish", "breakout",
   "record", "all-time high", "ath", "upgrade", "adoption", "inflow", "inflows", "accumulate", "buy",
@@ -206,43 +231,48 @@ export function scoreFundamental(row: MarketRow): { score: number; checks: Score
 }
 
 export function scoreNews(headlines: NewsHeadline[]): {
-  score: number; checks: ScoreCheck[]; hasMajorNegative: boolean;
+  score: number; checks: ScoreCheck[]; majorBearish: boolean; bullishCount: number; softBearishCount: number;
 } {
-  const positives: string[] = [];
-  const negatives: string[] = [];
+  const bullish: string[] = [];
+  const soft: string[] = [];
+  const major: string[] = [];
   for (const h of headlines) {
-    const c = classifyCatalyst(`${h.title} ${h.summary ?? ""}`);
-    if (c === "positive") positives.push(h.title);
-    else if (c === "negative") negatives.push(h.title);
+    const c = classifyNews(`${h.title} ${h.summary ?? ""}`);
+    if (c === "MAJOR_BEARISH") major.push(h.title);
+    else if (c === "BULLISH") bullish.push(h.title);
+    else if (c === "SOFT_BEARISH") soft.push(h.title);
   }
 
-  const posPoints = Math.min(positives.length * SCORING.NEWS_POSITIVE_PER, SCORING.NEWS_POSITIVE_CAP);
-  const raw = posPoints - negatives.length * SCORING.NEWS_NEGATIVE_PER;
-  const score = Math.max(raw, SCORING.NEWS_FLOOR);
-  const negPoints = score - posPoints; // keeps check points summing to score (reflects the floor)
+  const bullScore = Math.min(bullish.length * SCORING.NEWS_BULLISH_PER, SCORING.NEWS_BULLISH_CAP);
+  const softScore = Math.max(soft.length * SCORING.NEWS_SOFT_BEARISH_PER, SCORING.NEWS_SOFT_BEARISH_CAP);
+  const score = bullScore + softScore; // major-bearish does NOT subtract; it blocks via RISK_BLOCK
+  const majorBearish = major.length > 0;
 
   const checks: ScoreCheck[] = [
     {
-      ...check(
-        "positive_catalysts",
-        posPoints,
-        `${positives.length} positive catalyst${positives.length !== 1 ? "s" : ""}${positives.length ? ` (${positives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → +${posPoints}`,
-        { actual: positives.length, threshold: `+2 ea, cap ${SCORING.NEWS_POSITIVE_CAP}` }
-      ),
-      details: positives.slice(0, 5),
+      ...check("bullish_news", bullScore, `${bullish.length} bullish${bullish.length ? ` (${bullish.slice(0, 2).join("; ").slice(0, 80)})` : ""} → +${bullScore}`, { actual: bullish.length, threshold: `+2 ea, cap +${SCORING.NEWS_BULLISH_CAP}` }),
+      details: bullish.slice(0, 5),
     },
     {
-      name: "negative_events",
-      passed: negatives.length === 0,
-      points: negPoints,
-      expression: `${negatives.length} negative event${negatives.length !== 1 ? "s" : ""}${negatives.length ? ` (${negatives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → ${negPoints}${raw < SCORING.NEWS_FLOOR ? ` (floored at ${SCORING.NEWS_FLOOR})` : ""}`,
-      actual: negatives.length,
-      threshold: `-3 ea, floor ${SCORING.NEWS_FLOOR}`,
-      details: negatives.slice(0, 5),
+      name: "soft_bearish_news",
+      passed: soft.length === 0,
+      points: softScore,
+      expression: `${soft.length} soft-bearish${soft.length ? ` (${soft.slice(0, 2).join("; ").slice(0, 80)})` : ""} → ${softScore}`,
+      actual: soft.length,
+      threshold: `-1 ea, cap ${SCORING.NEWS_SOFT_BEARISH_CAP}`,
+      details: soft.slice(0, 5),
+    },
+    {
+      name: "major_bearish",
+      passed: !majorBearish,
+      points: 0,
+      expression: majorBearish ? `MAJOR bearish: ${major.slice(0, 2).join("; ").slice(0, 80)} → blocks buy alerts` : "no major bearish news",
+      actual: major.length,
+      details: major.slice(0, 5),
     },
   ];
 
-  return { score, checks, hasMajorNegative: negatives.length > 0 };
+  return { score, checks, majorBearish, bullishCount: bullish.length, softBearishCount: soft.length };
 }
 
 export function scoreTechnical(candles: Candle[], row: MarketRow): {
@@ -295,9 +325,9 @@ export function scoreTechnical(candles: Candle[], row: MarketRow): {
   checks.push(check("rsi_momentum", rsiPts, rsiExpr, { actual: rsi ?? "n/a" }));
 
   // Pullback entry (independent, per spec)
-  const nearEma20 = ema20 != null && price > 0 && Math.abs(price - ema20) / ema20 <= SCORING.NEAR_EMA_PCT;
+  const nearEma20 = ema20 != null && price > 0 && Math.abs(price - ema20) / ema20 <= SCORING.NEAR_EMA20_PCT;
   checks.push(check("pullback_near_ema20", nearEma20 ? 2 : 0, ema20 != null ? `price ${nearEma20 ? "near" : "off"} EMA20 → +${nearEma20 ? 2 : 0}` : "EMA20 n/a → +0"));
-  const nearEma50 = ema50 != null && price > 0 && Math.abs(price - ema50) / ema50 <= SCORING.NEAR_EMA_PCT;
+  const nearEma50 = ema50 != null && price > 0 && Math.abs(price - ema50) / ema50 <= SCORING.NEAR_EMA50_PCT;
   checks.push(check("pullback_near_ema50", nearEma50 ? 3 : 0, ema50 != null ? `price ${nearEma50 ? "near" : "off"} EMA50 → +${nearEma50 ? 3 : 0}` : "EMA50 n/a → +0"));
 
   // Overextension risk
@@ -310,25 +340,24 @@ export function scoreTechnical(candles: Candle[], row: MarketRow): {
   return { score, checks, rsi, ema20, ema50, ema200 };
 }
 
-export function classify(fundamental: number, technical: number, total: number, hasMajorNegativeNews: boolean): Category {
-  if (
-    total >= SCORING.STRONG_BUY.total &&
-    fundamental >= SCORING.STRONG_BUY.fundamental &&
-    technical >= SCORING.STRONG_BUY.technical &&
-    !hasMajorNegativeNews
-  ) return "STRONG_BUY";
+/** Diagnostic combined band only — actionable alerts come from the strategies. */
+export function classify(fundamental: number, technical: number, total: number, majorBearish: boolean): Category {
+  if (total >= 22 && fundamental >= 3 && technical >= 9 && !majorBearish) return "STRONG_BUY";
   if (total >= SCORING.WATCHLIST_MIN) return "WATCHLIST";
   return "AVOID";
 }
 
-/** Combine all three score blocks into a single result with full breakdown. */
+const checkOn = (checks: ScoreCheck[], name: string): boolean => (checks.find(c => c.name === name)?.points ?? 0) > 0;
+
+/** Combine all three score blocks into a full scorecard (consumed by strategies). */
 export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHeadline[]): ScoreResult {
   const f = scoreFundamental(row);
   const n = scoreNews(headlines);
   const t = scoreTechnical(candles, row);
 
   const total = f.score + n.score + t.score;
-  const category = classify(f.score, t.score, total, n.hasMajorNegative);
+  const category = classify(f.score, t.score, total, n.majorBearish);
+  const price = candles.length ? candles[candles.length - 1].close : 0;
 
   const checks: ScoreChecks = { fundamental: f.checks, news: n.checks, technical: t.checks };
   const reasons = [...f.checks, ...n.checks, ...t.checks].filter(c => c.points > 0).map(c => c.expression);
@@ -338,6 +367,8 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
   const newsHeadlines = headlines.map(h => ({ title: h.title, sentiment: classifySentiment(`${h.title} ${h.summary ?? ""}`) }));
   const newsSentiment = weighSentiment(newsHeadlines);
 
+  const volumeMultiplier = row.volume7dAvg && row.volume7dAvg > 0 ? row.volume24h / row.volume7dAvg : null;
+
   return {
     fundamental: f.score,
     news: n.score,
@@ -346,7 +377,7 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
     category,
     reasons,
     risks,
-    hasMajorNegativeNews: n.hasMajorNegative,
+    hasMajorNegativeNews: n.majorBearish,
     rsi: t.rsi,
     ema20: t.ema20,
     ema50: t.ema50,
@@ -354,5 +385,18 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
     checks,
     newsHeadlines,
     newsSentiment,
+    majorBearish: n.majorBearish,
+    bullishCount: n.bullishCount,
+    softBearishCount: n.softBearishCount,
+    price,
+    priceAboveEma200: checkOn(t.checks, "price_above_ema200"),
+    ema50AboveEma200: checkOn(t.checks, "ema50_above_ema200"),
+    ema200Rising: checkOn(t.checks, "ema200_rising"),
+    nearEma20: checkOn(t.checks, "pullback_near_ema20"),
+    nearEma50: checkOn(t.checks, "pullback_near_ema50"),
+    volumeMultiplier,
+    change24hPct: row.change24hPct,
+    change7dPct: row.change7dPct,
+    marketCapRank: row.marketCapRank,
   };
 }

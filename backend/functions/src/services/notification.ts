@@ -222,16 +222,16 @@ async function sendPushToAllTokens(
  */
 export async function sendCryptoBuyAlertNotification(
   symbol: string,
-  category: "STRONG_BUY" | "WATCHLIST",
+  alertType: string,
   total: number,
   reasons: string[]
 ): Promise<void> {
-  const label = category === "STRONG_BUY" ? "🚀 STRONG BUY" : "👀 WATCHLIST";
+  const label = `🔔 ${alertType.replace(/_/g, " ")}`;
   const top = reasons.slice(0, 3).join(" · ");
   await sendPushToAllTokens(
     label,
     `${symbol} (score ${total})${top ? ` — ${top}` : ""}`,
-    { type: "CRYPTO_BUY_ALERT", symbol, category, score: String(total) },
+    { type: "CRYPTO_BUY_ALERT", symbol, alertType, score: String(total) },
     "CRYPTO_BUY_ALERT"
   );
 }

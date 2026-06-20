@@ -12,13 +12,19 @@ import {
   SafeAreaView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { fetchLastRun, MonitorRun, MonitorCoin, MonitorCategory } from "../services/api";
+import { fetchLastRun, MonitorRun, MonitorCoin, MonitorAlertType } from "../services/api";
 
-const CATEGORY_META: Record<MonitorCategory, { label: string; emoji: string; color: string }> = {
+const ALERT_META: Record<MonitorAlertType, { label: string; emoji: string; color: string }> = {
+  RISK_BLOCK: { label: "Risk Block", emoji: "🛑", color: "#d9534f" },
   STRONG_BUY: { label: "Strong Buy", emoji: "🚀", color: "#5cb85c" },
-  WATCHLIST: { label: "Watchlist", emoji: "👀", color: "#f0ad4e" },
-  AVOID: { label: "Avoid", emoji: "🛑", color: "#6c757d" },
+  PULLBACK_BUY_ZONE: { label: "Pullback Zone", emoji: "🎯", color: "#5cb85c" },
+  BUY_SETUP: { label: "Buy Setup", emoji: "✅", color: "#5bc0de" },
+  MOMENTUM_BREAKOUT: { label: "Momentum", emoji: "🚦", color: "#5bc0de" },
+  ACCUMULATION_SETUP: { label: "Accumulation", emoji: "🧺", color: "#f0ad4e" },
+  FUNDAMENTAL_WATCH: { label: "Watch", emoji: "👀", color: "#f0ad4e" },
+  NONE: { label: "No signal", emoji: "⚪", color: "#6c757d" },
 };
+const metaFor = (t?: MonitorAlertType) => ALERT_META[t ?? "NONE"] ?? ALERT_META.NONE;
 
 export default function LastRunScreen() {
   const [run, setRun] = useState<MonitorRun | null>(null);
@@ -87,7 +93,7 @@ export default function LastRunScreen() {
           </View>
         }
         renderItem={({ item }) => {
-          const meta = CATEGORY_META[item.category];
+          const meta = metaFor(item.alertType);
           return (
             <TouchableOpacity
               style={[styles.tile, { borderColor: meta.color }]}
@@ -108,7 +114,7 @@ export default function LastRunScreen() {
             <>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
-                  {CATEGORY_META[selected.category].emoji} {selected.symbol}
+                  {metaFor(selected.alertType).emoji} {selected.symbol}
                 </Text>
                 <TouchableOpacity onPress={() => setSelected(null)}>
                   <Text style={styles.modalClose}>✕</Text>

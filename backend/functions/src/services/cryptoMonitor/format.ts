@@ -1,11 +1,24 @@
 /**
  * Telegram formatters for the crypto monitor — the per-coin drill-down.
  * `formatBeginnerBreakdown` is the default plain-English view; `formatBreakdown`
- * is the technical, check-by-check view (via `/coin <sym> full`).
+ * is the technical, check-by-check view (via `/coin <sym> full`). Both surface
+ * the triggered strategies + the selected alert.
  */
 
-import { ScoreResult, ScoreCheck, Category, SCORING } from "./scoring";
+import { ScoreResult, ScoreCheck } from "./scoring";
 import { WatchCoin } from "./watchlist";
+import { evaluateAll, selectAlert, AlertType, StrategyResult } from "./strategies";
+
+export const ALERT_META: Record<AlertType | "NONE", { emoji: string; title: string }> = {
+  RISK_BLOCK: { emoji: "🛑", title: "Risk Block" },
+  STRONG_BUY: { emoji: "🚀", title: "Strong Buy" },
+  PULLBACK_BUY_ZONE: { emoji: "🎯", title: "Pullback Buy Zone" },
+  BUY_SETUP: { emoji: "✅", title: "Buy Setup" },
+  MOMENTUM_BREAKOUT: { emoji: "🚦", title: "Momentum Breakout" },
+  ACCUMULATION_SETUP: { emoji: "🧺", title: "Accumulation Setup" },
+  FUNDAMENTAL_WATCH: { emoji: "👀", title: "Fundamental Watch" },
+  NONE: { emoji: "⚪", title: "No signal" },
+};
 
 function icon(c: ScoreCheck): string {
   if (c.points > 0) return "✓";
@@ -18,28 +31,28 @@ function block(title: string, checks: ScoreCheck[], subtotal: number, max: numbe
   return `*${title}* (${subtotal}/${max})\n${lines}`;
 }
 
-/** Full block-by-block breakdown for `/coin <symbol>`. */
+function strategyLines(triggered: StrategyResult[]): string {
+  if (triggered.length === 0) return "  (none triggered)";
+  return triggered.map(s => `  ${ALERT_META[s.name].emoji} ${ALERT_META[s.name].title}`).join("\n");
+}
+
+/** Full block-by-block breakdown for `/coin <symbol> full`. */
 export function formatBreakdown(coin: WatchCoin, r: ScoreResult, price: number): string {
   const priceStr = price >= 1 ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : `$${price.toPrecision(4)}`;
-
-  const gate = [
-    `total ${r.total} ≥ ${SCORING.STRONG_BUY.total} ${r.total >= SCORING.STRONG_BUY.total ? "✓" : "✗"}`,
-    `fundamental ${r.fundamental} ≥ ${SCORING.STRONG_BUY.fundamental} ${r.fundamental >= SCORING.STRONG_BUY.fundamental ? "✓" : "✗"}`,
-    `technical ${r.technical} ≥ ${SCORING.STRONG_BUY.technical} ${r.technical >= SCORING.STRONG_BUY.technical ? "✓" : "✗"}`,
-    `no major negative news ${r.hasMajorNegativeNews ? "✗" : "✓"}`,
-  ].join("\n  ");
+  const { selected, triggered } = selectAlert(evaluateAll(r));
+  const sel = selected ? ALERT_META[selected.name] : ALERT_META.NONE;
 
   return [
-    `🔬 *${coin.symbol}* (${coin.coinbaseProductId}) — *${r.category}*`,
-    `Price: ${priceStr}   Total: *${r.total}/40*`,
+    `🔬 *${coin.symbol}* (${coin.coinbaseProductId}) — ${sel.emoji} *${sel.title}*`,
+    `Price: ${priceStr}   F:${r.fundamental}  N:${r.news}  T:${r.technical}  Total:*${r.total}*`,
     "",
     block("Fundamental", r.checks.fundamental, r.fundamental, 15),
     "",
-    block("News", r.checks.news, r.news, 10),
+    block("News", r.checks.news, r.news, 4),
     "",
     block("Technical", r.checks.technical, r.technical, 15),
     "",
-    `*STRONG_BUY gate:*\n  ${gate}`,
+    `*Triggered strategies:*\n${strategyLines(triggered)}`,
   ].join("\n");
 }
 
@@ -63,9 +76,10 @@ function friendly(c: ScoreCheck): { tone: Tone; text: string } | null {
       return p > 0 ? { tone: "good", text: `Fresh stablecoin cash entering its network` } : null;
     case "ecosystem_revenue":
       return p > 0 ? { tone: "good", text: `The network is earning more fees (real usage)` } : null;
-    // News is rendered separately as a "Recent news" section with real headlines.
-    case "positive_catalysts":
-    case "negative_events":
+    // News is rendered separately as a "Recent news" section.
+    case "bullish_news":
+    case "soft_bearish_news":
+    case "major_bearish":
       return null;
     case "price_above_ema200":
       return p > 0 ? { tone: "good", text: `Price is above its long-term average — overall uptrend` }
@@ -89,45 +103,32 @@ function friendly(c: ScoreCheck): { tone: Tone; text: string } | null {
   }
 }
 
-const VERDICT: Record<Category, { emoji: string; title: string; meaning: string; bottom: string }> = {
-  STRONG_BUY: {
-    emoji: "🚀", title: "Strong Buy",
-    meaning: "multiple signals line up for a potential entry.",
-    bottom: "Looks like a high-quality setup right now — but only invest what you can afford to lose.",
-  },
-  WATCHLIST: {
-    emoji: "👀", title: "Watchlist",
-    meaning: "interesting, but not a clear buy yet.",
-    bottom: "Worth keeping an eye on. Wait for the setup to line up more before entering.",
-  },
-  AVOID: {
-    emoji: "🛑", title: "Avoid (for now)",
-    meaning: "the signals don't support buying here.",
-    bottom: "Not a good entry right now based on its trend, news and fundamentals.",
-  },
-};
-
 /** Plain-English summary for `/coin <symbol>` (default view). */
 export function formatBeginnerBreakdown(coin: WatchCoin, r: ScoreResult, price: number): string {
   const priceStr = price >= 1 ? `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : `$${price.toPrecision(4)}`;
-  const v = VERDICT[r.category];
-  const strength = r.total >= SCORING.STRONG_BUY.total ? "strong" : r.total >= SCORING.WATCHLIST_MIN ? "mixed" : "weak";
+  const { selected, triggered } = selectAlert(evaluateAll(r));
+  const sel = selected ? ALERT_META[selected.name] : ALERT_META.NONE;
 
   const all = [...r.checks.fundamental, ...r.checks.news, ...r.checks.technical];
   const goods: string[] = [];
   const bads: string[] = [];
   for (const c of all) {
-    const f = friendly(c);
-    if (!f) continue;
-    const arr = f.tone === "good" ? goods : bads;
-    if (!arr.includes(f.text)) arr.push(f.text); // de-dupe (e.g. two pullback checks)
+    const fr = friendly(c);
+    if (!fr) continue;
+    const arr = fr.tone === "good" ? goods : bads;
+    if (!arr.includes(fr.text)) arr.push(fr.text); // de-dupe (e.g. two pullback checks)
   }
 
   const lines = [
-    `${v.emoji} *${coin.symbol}* — *${v.title}*`,
-    `_${capitalize(v.meaning)}_`,
-    `Price: ${priceStr}   ·   Score: *${r.total}/40* (${strength})`,
+    `${sel.emoji} *${coin.symbol}* — *${sel.title}*`,
+    `Price: ${priceStr}   ·   F:${r.fundamental} N:${r.news} T:${r.technical} (total ${r.total})`,
   ];
+
+  // Signals (the separate strategies)
+  lines.push("", "🎯 *Signals:*");
+  if (triggered.length) lines.push(...triggered.map(s => `${ALERT_META[s.name].emoji} ${ALERT_META[s.name].title}`));
+  else lines.push("• No strategy triggered right now");
+
   if (goods.length) lines.push("", "✅ *In its favour:*", ...goods.map(t => `• ${t}`));
   if (bads.length) lines.push("", "⚠️ *Things to watch:*", ...bads.map(t => `• ${t}`));
 
@@ -141,13 +142,14 @@ export function formatBeginnerBreakdown(coin: WatchCoin, r: ScoreResult, price: 
     lines.push("_No headlines found across sources right now._");
   }
 
-  lines.push("", `*Bottom line:* ${v.bottom}`);
+  if (selected) {
+    if (selected.risks.length) lines.push("", "⚠️ *Risk:*", ...selected.risks.map(t => `• ${t}`));
+    lines.push("", `*Action:* ${selected.action}`);
+  } else {
+    lines.push("", "*Action:* Nothing actionable right now — keep monitoring.");
+  }
   lines.push("", `_Educational only, not financial advice._  ·  _/coin ${coin.symbol} full for the numbers_`);
   return lines.join("\n");
-}
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function clip(s: string, max = 140): string {
