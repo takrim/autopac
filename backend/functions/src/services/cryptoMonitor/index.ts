@@ -93,9 +93,10 @@ async function collectAndScore(
  * @param opts.dryRun preview only — no Firestore writes, no alerts, no auto-buy
  *   (used by the Telegram /scan command). The scheduled run uses the default.
  */
-export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: boolean; dryRun?: boolean }): Promise<MonitorRunResult> {
+export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: boolean; dryRun?: boolean; forceBuy?: boolean }): Promise<MonitorRunResult> {
   const notify = opts?.notify ?? true;
   const dryRun = opts?.dryRun ?? false;
+  const forceBuy = opts?.forceBuy ?? false;
 
   let watchlist: WatchCoin[];
   if (opts?.onlySymbol) {
@@ -144,6 +145,14 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
         category: result.category,
         expiresAt: Timestamp.fromMillis(Date.now() + METRICS_TTL_MS),
       });
+
+      if (forceBuy) {
+        await autoBuy(coin, result, price, notify, tradingConfig, true).catch(err =>
+          logger.error("[CRYPTO_MONITOR] forced buy failed", { symbol: coin.symbol, error: String(err) })
+        );
+        alerts++;
+        continue;
+      }
 
       const emitted = await reconcileAlert(coin, result, price, notify, tradingConfig);
       if (emitted) alerts++;
@@ -220,8 +229,12 @@ async function reconcileAlert(coin: WatchCoin, result: ScoreResult, price: numbe
   return true;
 }
 
-/** Place a buy on STRONG_BUY, mirroring the bulltrend path (AUTO_APPROVE + pyramid gated). */
-async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig): Promise<void> {
+/**
+ * Place a buy mirroring the bulltrend path (pyramid + AUTO_APPROVE gated).
+ * `force` is for the `/scan <sym> live force` manual test — it executes the order
+ * regardless of AUTO_APPROVE (still pyramid + risk gated), like a manual /buy.
+ */
+async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig, force = false): Promise<void> {
   // Pyramid guard — skip if already holding.
   if (!cfg.ORDER_PYRAMID) {
     try {
@@ -260,18 +273,19 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
     action: "BUY",
     symbol: coin.coinbaseProductId,
     price: entryPrice,
-    reason: `Crypto monitor STRONG_BUY (score ${result.total})`,
-    expression: `F${result.fundamental}/N${result.news}/T${result.technical} → ${result.total} ≥ ${25}`,
+    reason: force ? `Crypto monitor FORCED test buy (score ${result.total})` : `Crypto monitor STRONG_BUY (score ${result.total})`,
+    expression: `F${result.fundamental}/N${result.news}/T${result.technical} → ${result.total}${force ? " (forced)" : ` ≥ ${25}`}`,
     signalId: ref.id,
   });
 
-  if (cfg.AUTO_APPROVE) {
+  if (force || cfg.AUTO_APPROVE) {
     const res = await executeOrder(buySignal, "crypto-monitor");
     if (notify) {
+      const tag = force ? "Crypto monitor FORCED BUY" : "Crypto monitor BUY";
       await sendTelegramMessage(
         res.status === "executed"
-          ? `✅ *Crypto monitor BUY* ${coin.symbol} @ ${entryPrice} (score ${result.total})`
-          : `❌ *Crypto monitor BUY not executed* ${coin.symbol}\nexecuteOrder: ${res.status}`
+          ? `✅ *${tag}* ${coin.symbol} @ ${entryPrice} (score ${result.total})`
+          : `❌ *${tag} not executed* ${coin.symbol}\nexecuteOrder: ${res.status}`
       ).catch(() => {});
     }
   } else if (notify) {

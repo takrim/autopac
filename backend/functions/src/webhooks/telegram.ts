@@ -670,21 +670,26 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
       }
       res.json({ ok: true });
     } else if (lower === "/scan" || lower.startsWith("/scan ")) {
-      const parts = text.trim().split(/\s+/);
-      const arg = parts[1];
-      const live = (parts[2] || "").toLowerCase() === "live";
-      if (live && !arg) {
-        await replyTo(chatId, "⚠️ Live mode needs a symbol (single coin only): /scan SOL live");
+      const parts = text.trim().split(/\s+/).map(p => p.toLowerCase());
+      const arg = text.trim().split(/\s+/)[1];
+      const live = parts.includes("live");
+      const force = parts.includes("force");
+      if ((live || force) && !arg) {
+        await replyTo(chatId, "⚠️ Live/force mode needs a symbol (single coin only): /scan SOL live  ·  /scan SOL live force");
         res.json({ ok: true });
         return;
       }
-      await replyTo(chatId, `⏳ ${live ? "LIVE run" : "Scanning"}${arg ? ` ${arg.toUpperCase()}` : " watchlist"}...`);
+      const mode = force ? "FORCED BUY test" : live ? "LIVE run" : "Scanning";
+      await replyTo(chatId, `⏳ ${mode}${arg ? ` ${arg.toUpperCase()}` : " watchlist"}...`);
       try {
-        // dry-run = preview (no writes/alerts/buy). live = real path (may auto-buy).
-        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: !live });
-        const header = live
-          ? `🟢 LIVE run — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} alert(s). Writes metrics/alerts; auto-buys if STRONG_BUY & AUTO_APPROVE.`
-          : `🔎 Crypto scan (preview) — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} would-alert`;
+        // dry-run = preview. live = real path (auto-buys if STRONG_BUY & AUTO_APPROVE).
+        // force = real path that buys regardless of score/AUTO_APPROVE (manual test).
+        const result = await runCryptoMonitor({ onlySymbol: arg, dryRun: !(live || force), forceBuy: force });
+        const header = force
+          ? `🛒 FORCED BUY test — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}. Placed a real order if pyramid/risk allow.`
+          : live
+            ? `🟢 LIVE run — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} alert(s). Writes metrics/alerts; auto-buys if STRONG_BUY & AUTO_APPROVE.`
+            : `🔎 Crypto scan (preview) — ${result.scanned} coin${result.scanned !== 1 ? "s" : ""}, ${result.alerts} would-alert`;
         await replyTo(chatId, `${header}\n\n${result.lines.join("\n") || "(no coins)"}`);
       } catch (scanErr) {
         logger.error("[TG_WEBHOOK] /scan failed", { error: String(scanErr) });
@@ -926,10 +931,12 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "  Show detailed description and parameters for a strategy.",
         "  Example: /strategy scalpx",
         "",
-        "*/scan* [symbol] [live]",
+        "*/scan* [symbol] [live] [force]",
         "  Preview the monitor now (whole universe, or one coin). Add 'live'",
-        "  (single coin only) to run the REAL path — writes + auto-buys if",
-        "  STRONG_BUY & AUTO_APPROVE.  Example: /scan SOL   ·   /scan SOL live",
+        "  (single coin) for the REAL path (auto-buys if STRONG_BUY & AUTO_APPROVE).",
+        "  Add 'force' to place a real test buy regardless of score/AUTO_APPROVE",
+        "  (pyramid+risk still apply). Use a tiny tradeValueUsd!",
+        "  Example: /scan SOL  ·  /scan SOL live  ·  /scan SOL live force",
         "",
         "*/coin* <symbol> [full]",
         "  Plain-English buy analysis for one coin. Add 'full' for the numbers.",
