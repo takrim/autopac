@@ -63,10 +63,10 @@ function friendly(c: ScoreCheck): { tone: Tone; text: string } | null {
       return p > 0 ? { tone: "good", text: `Fresh stablecoin cash entering its network` } : null;
     case "ecosystem_revenue":
       return p > 0 ? { tone: "good", text: `The network is earning more fees (real usage)` } : null;
+    // News is rendered separately as a "Recent news" section with real headlines.
     case "positive_catalysts":
-      return p > 0 ? { tone: "good", text: `Positive news/catalysts recently` } : null;
     case "negative_events":
-      return p < 0 ? { tone: "bad", text: `Negative news recently (e.g. hack, lawsuit, outage)` } : null;
+      return null;
     case "price_above_ema200":
       return p > 0 ? { tone: "good", text: `Price is above its long-term average — overall uptrend` }
                    : { tone: "bad", text: `Price is below its long-term average — overall downtrend` };
@@ -130,6 +130,18 @@ export function formatBeginnerBreakdown(coin: WatchCoin, r: ScoreResult, price: 
   ];
   if (goods.length) lines.push("", "✅ *In its favour:*", ...goods.map(t => `• ${t}`));
   if (bads.length) lines.push("", "⚠️ *Things to watch:*", ...bads.map(t => `• ${t}`));
+
+  // Recent news — show the actual headlines (negatives first, they matter more).
+  const posNews = r.checks.news.find(c => c.name === "positive_catalysts")?.details ?? [];
+  const negNews = r.checks.news.find(c => c.name === "negative_events")?.details ?? [];
+  lines.push("", "📰 *Recent news:*");
+  if (posNews.length || negNews.length) {
+    for (const t of negNews.slice(0, 3)) lines.push(`⚠️ ${clip(t)}`);
+    for (const t of posNews.slice(0, 3)) lines.push(`✅ ${clip(t)}`);
+  } else {
+    lines.push("_No notable headlines found recently._");
+  }
+
   lines.push("", `*Bottom line:* ${v.bottom}`);
   lines.push("", `_Educational only, not financial advice._  ·  _/coin ${coin.symbol} full for the numbers_`);
   return lines.join("\n");
@@ -137,4 +149,9 @@ export function formatBeginnerBreakdown(coin: WatchCoin, r: ScoreResult, price: 
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function clip(s: string, max = 140): string {
+  const t = s.trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }

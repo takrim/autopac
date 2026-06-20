@@ -100,6 +100,20 @@ describe("scoreNews", () => {
     expect(r.score).toBe(0);
     expect(r.hasMajorNegative).toBe(false);
   });
+
+  test("exposes matched headlines in check details", () => {
+    const r = scoreNews([h("Bitcoin ETF approved"), h("Exchange hacked, funds stolen")]);
+    const pos = r.checks.find(c => c.name === "positive_catalysts");
+    const neg = r.checks.find(c => c.name === "negative_events");
+    expect(pos?.details).toContain("Bitcoin ETF approved");
+    expect(neg?.details).toContain("Exchange hacked, funds stolen");
+  });
+
+  test("classifies using title + summary, displays clean title", () => {
+    const r = scoreNews([{ title: "Big update", summary: "major partnership with Visa" }]);
+    expect(r.score).toBe(2);
+    expect(r.checks.find(c => c.name === "positive_catalysts")?.details).toEqual(["Big update"]);
+  });
 });
 
 describe("scoreTechnical", () => {

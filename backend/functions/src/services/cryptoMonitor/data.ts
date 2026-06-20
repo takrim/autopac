@@ -287,12 +287,13 @@ export async function fetchNewsDataHeadlines(symbols: string[]): Promise<Map<str
 
     const map = new Map<string, NewsHeadline[]>();
     for (const a of data.results) {
-      const title = `${a.title ?? ""} ${a.description ?? ""}`.trim();
+      const title = (a.title ?? "").trim();
       if (!title) continue;
+      const summary = (a.description ?? "").trim() || undefined;
       for (const c of a.coin ?? []) {
         const key = String(c).toUpperCase();
         const list = map.get(key) ?? [];
-        list.push({ title });
+        list.push({ title, summary });
         map.set(key, list);
       }
     }

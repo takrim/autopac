@@ -24,6 +24,7 @@ export interface ScoreCheck {
   expression: string; // human-readable, e.g. "rank 7 (<50) → +3"
   actual?: number | string;
   threshold?: number | string;
+  details?: string[]; // supporting items, e.g. matched news headlines
 }
 
 export interface Candle {
@@ -49,6 +50,7 @@ export interface MarketRow {
 
 export interface NewsHeadline {
   title: string;
+  summary?: string; // optional body/description — used for classification, not display
 }
 
 export interface ScoreChecks {
@@ -169,7 +171,7 @@ export function scoreNews(headlines: NewsHeadline[]): {
   const positives: string[] = [];
   const negatives: string[] = [];
   for (const h of headlines) {
-    const c = classifyCatalyst(h.title);
+    const c = classifyCatalyst(`${h.title} ${h.summary ?? ""}`);
     if (c === "positive") positives.push(h.title);
     else if (c === "negative") negatives.push(h.title);
   }
@@ -180,12 +182,15 @@ export function scoreNews(headlines: NewsHeadline[]): {
   const negPoints = score - posPoints; // keeps check points summing to score (reflects the floor)
 
   const checks: ScoreCheck[] = [
-    check(
-      "positive_catalysts",
-      posPoints,
-      `${positives.length} positive catalyst${positives.length !== 1 ? "s" : ""}${positives.length ? ` (${positives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → +${posPoints}`,
-      { actual: positives.length, threshold: `+2 ea, cap ${SCORING.NEWS_POSITIVE_CAP}` }
-    ),
+    {
+      ...check(
+        "positive_catalysts",
+        posPoints,
+        `${positives.length} positive catalyst${positives.length !== 1 ? "s" : ""}${positives.length ? ` (${positives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → +${posPoints}`,
+        { actual: positives.length, threshold: `+2 ea, cap ${SCORING.NEWS_POSITIVE_CAP}` }
+      ),
+      details: positives.slice(0, 5),
+    },
     {
       name: "negative_events",
       passed: negatives.length === 0,
@@ -193,6 +198,7 @@ export function scoreNews(headlines: NewsHeadline[]): {
       expression: `${negatives.length} negative event${negatives.length !== 1 ? "s" : ""}${negatives.length ? ` (${negatives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → ${negPoints}${raw < SCORING.NEWS_FLOOR ? ` (floored at ${SCORING.NEWS_FLOOR})` : ""}`,
       actual: negatives.length,
       threshold: `-3 ea, floor ${SCORING.NEWS_FLOOR}`,
+      details: negatives.slice(0, 5),
     },
   ];
 
