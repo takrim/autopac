@@ -35,6 +35,7 @@ import {
 } from "./api/alpaca";
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
+import { handleListCryptoAlerts } from "./api/crypto";
 import { handleTelegramWebhook } from "./webhooks/telegram";
 import { sendTelegramMessage } from "./services/telegram";
 import { runCryptoMonitor } from "./services/cryptoMonitor";
@@ -78,6 +79,7 @@ apiApp.get("/portfolio-history", handleGetPortfolioHistory);
 apiApp.get("/config", handleGetConfig);
 apiApp.patch("/config", handleUpdateConfig);
 apiApp.get("/trending", handleGetTrending);
+apiApp.get("/crypto-alerts", handleListCryptoAlerts);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.
@@ -88,7 +90,7 @@ export const webhook = onRequest(
     maxInstances: 10,
     timeoutSeconds: 120,
     invoker: "public",
-    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "COINGECKO_API_KEY"],
+    secrets: ["WEBHOOK_SECRET", "ALPACA_API_KEY", "ALPACA_API_SECRET", "COINBASE_API_KEY", "COINBASE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_WEBHOOK_SECRET", "COINGECKO_API_KEY", "NEWSDATA_API_KEY"],
   },
   webhookApp
 );
@@ -123,7 +125,7 @@ export const tgbot = onRequest(
     maxInstances: 1,
     timeoutSeconds: 540,
     invoker: "public",
-    secrets: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "COINBASE_API_KEY", "COINBASE_API_SECRET", "GEMINI_API_KEY", "RESEND_API_KEY", "COINGECKO_API_KEY"],
+    secrets: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "COINBASE_API_KEY", "COINBASE_API_SECRET", "GEMINI_API_KEY", "RESEND_API_KEY", "COINGECKO_API_KEY", "NEWSDATA_API_KEY"],
   },
   tgbotApp
 );
@@ -137,7 +139,7 @@ export const cryptoMonitor = onSchedule(
     schedule: "every 15 minutes",
     timeoutSeconds: 300,
     maxInstances: 1,
-    secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "COINGECKO_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "COINGECKO_API_KEY", "NEWSDATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
   },
   async () => {
     try {

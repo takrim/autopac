@@ -7,25 +7,33 @@
 import { getFirestore } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 
+/** DefiLlama mapping — `chain` uses historicalChainTvl + stablecoins; `protocol`
+ * uses /protocol + /summary/fees. Omit for coins without a DeFi ecosystem. */
+export interface DefiLlamaRef {
+  kind: "chain" | "protocol";
+  slug: string;
+}
+
 export interface WatchCoin {
   symbol: string; // display, e.g. "SOL"
   coinbaseProductId: string; // "SOL-USD"
   coingeckoId: string; // "solana"
+  defillama?: DefiLlamaRef;
 }
 
 export const DEFAULT_WATCHLIST: WatchCoin[] = [
   { symbol: "BTC", coinbaseProductId: "BTC-USD", coingeckoId: "bitcoin" },
-  { symbol: "ETH", coinbaseProductId: "ETH-USD", coingeckoId: "ethereum" },
-  { symbol: "SOL", coinbaseProductId: "SOL-USD", coingeckoId: "solana" },
+  { symbol: "ETH", coinbaseProductId: "ETH-USD", coingeckoId: "ethereum", defillama: { kind: "chain", slug: "Ethereum" } },
+  { symbol: "SOL", coinbaseProductId: "SOL-USD", coingeckoId: "solana", defillama: { kind: "chain", slug: "Solana" } },
   { symbol: "LINK", coinbaseProductId: "LINK-USD", coingeckoId: "chainlink" },
-  { symbol: "SUI", coinbaseProductId: "SUI-USD", coingeckoId: "sui" },
-  { symbol: "AVAX", coinbaseProductId: "AVAX-USD", coingeckoId: "avalanche-2" },
-  { symbol: "NEAR", coinbaseProductId: "NEAR-USD", coingeckoId: "near" },
-  { symbol: "AAVE", coinbaseProductId: "AAVE-USD", coingeckoId: "aave" },
-  { symbol: "UNI", coinbaseProductId: "UNI-USD", coingeckoId: "uniswap" },
-  { symbol: "ARB", coinbaseProductId: "ARB-USD", coingeckoId: "arbitrum" },
-  { symbol: "OP", coinbaseProductId: "OP-USD", coingeckoId: "optimism" },
-  { symbol: "INJ", coinbaseProductId: "INJ-USD", coingeckoId: "injective-protocol" },
+  { symbol: "SUI", coinbaseProductId: "SUI-USD", coingeckoId: "sui", defillama: { kind: "chain", slug: "Sui" } },
+  { symbol: "AVAX", coinbaseProductId: "AVAX-USD", coingeckoId: "avalanche-2", defillama: { kind: "chain", slug: "Avalanche" } },
+  { symbol: "NEAR", coinbaseProductId: "NEAR-USD", coingeckoId: "near", defillama: { kind: "chain", slug: "Near" } },
+  { symbol: "AAVE", coinbaseProductId: "AAVE-USD", coingeckoId: "aave", defillama: { kind: "protocol", slug: "aave" } },
+  { symbol: "UNI", coinbaseProductId: "UNI-USD", coingeckoId: "uniswap", defillama: { kind: "protocol", slug: "uniswap" } },
+  { symbol: "ARB", coinbaseProductId: "ARB-USD", coingeckoId: "arbitrum", defillama: { kind: "chain", slug: "Arbitrum" } },
+  { symbol: "OP", coinbaseProductId: "OP-USD", coingeckoId: "optimism", defillama: { kind: "chain", slug: "OP Mainnet" } },
+  { symbol: "INJ", coinbaseProductId: "INJ-USD", coingeckoId: "injective-protocol", defillama: { kind: "chain", slug: "Injective" } },
 ];
 
 function isValidCoin(c: unknown): c is WatchCoin {

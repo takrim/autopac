@@ -1,19 +1,30 @@
 /**
  * Crypto buy-signal scoring — pure functions, no I/O (unit-testable).
  *
- * MVP scope: technical (full) + CoinGecko fundamentals (rank + volume growth)
- * + Google-News sentiment. DefiLlama TVL/stablecoin/revenue are deferred, which
- * caps the fundamental block at 6 (vs the spec's 15), so the category thresholds
- * below are PROVISIONAL.
+ * Phase 2: full 40-pt spec.
+ *   Fundamental (15): market-cap rank + volume growth + DefiLlama TVL growth,
+ *                     stablecoin inflows, ecosystem revenue.
+ *   News (10):        catalyst classification (positive cap +6, negative −3 each
+ *                     floored at −6).
+ *   Technical (15):   EMA trend + RSI momentum + pullback + overextension risk.
  *
- * TODO(phase2): once DefiLlama fundamentals land (restoring fundamental max 15
- * and total max 40), revert STRONG_BUY to the spec gate (total ≥ 25,
- * fundamental ≥ 8, technical ≥ 8) and WATCHLIST 18–24.
+ * Every rule emits a structured `ScoreCheck` so the Telegram drill-down can show
+ * exactly how a coin's score was computed.
  */
 
 import { rsiSeries, emaSeries, lastFinite } from "../ta";
 
 export type Category = "STRONG_BUY" | "WATCHLIST" | "AVOID";
+
+/** A single scored rule. `points` is the score delta (may be 0 or negative). */
+export interface ScoreCheck {
+  name: string;
+  passed: boolean; // true when the rule contributed positively
+  points: number;
+  expression: string; // human-readable, e.g. "rank 7 (<50) → +3"
+  actual?: number | string;
+  threshold?: number | string;
+}
 
 export interface Candle {
   open: number;
@@ -30,11 +41,20 @@ export interface MarketRow {
   volume7dAvg: number | null; // avg daily USD volume over 7d
   change24hPct: number; // %
   change7dPct: number; // %
+  // DefiLlama fundamentals — null when the coin has no mapped DeFi ecosystem.
+  tvlChange30dPct: number | null;
+  stablecoinInflow30dPct: number | null;
+  revenueRising: boolean | null;
 }
 
 export interface NewsHeadline {
-  sentiment: "bullish" | "bearish" | "neutral";
   title: string;
+}
+
+export interface ScoreChecks {
+  fundamental: ScoreCheck[];
+  news: ScoreCheck[];
+  technical: ScoreCheck[];
 }
 
 export interface ScoreResult {
@@ -50,60 +70,140 @@ export interface ScoreResult {
   ema20: number | null;
   ema50: number | null;
   ema200: number | null;
+  checks: ScoreChecks;
 }
 
-/** Single source of truth for thresholds — provisional MVP values (see file header). */
+/** Single source of truth for thresholds — spec values (40-pt scale). */
 export const SCORING = {
-  STRONG_BUY: { total: 20, technical: 9, fundamental: 4 },
-  WATCHLIST_MIN: 14,
+  STRONG_BUY: { total: 25, fundamental: 8, technical: 8 },
+  WATCHLIST_MIN: 18,
   NEAR_EMA_PCT: 0.02, // price within 2% of an EMA counts as "near"
   NEWS_POSITIVE_PER: 2,
   NEWS_POSITIVE_CAP: 6,
   NEWS_NEGATIVE_PER: 3,
+  NEWS_FLOOR: -6,
   EMA200_RISING_LOOKBACK: 24, // hourly bars (~1 day)
 };
 
-export function scoreFundamental(row: MarketRow): { score: number; reasons: string[] } {
-  let score = 0;
-  const reasons: string[] = [];
-  const rank = row.marketCapRank;
-  if (rank != null && rank < 50) { score += 3; reasons.push(`Market-cap rank ${rank} (<50)`); }
-  else if (rank != null && rank < 100) { score += 2; reasons.push(`Market-cap rank ${rank} (<100)`); }
-  else if (rank != null && rank < 200) { score += 1; reasons.push(`Market-cap rank ${rank} (<200)`); }
+const POSITIVE_CATALYSTS = [
+  "etf", "approval", "approved", "partnership", "partners with", "integration", "integrates",
+  "listing", "lists", "listed", "upgrade", "mainnet", "institutional", "adoption", "invests",
+  "investment", "backed", "grant", "all-time high", "record high", "buyback",
+];
+const MAJOR_NEGATIVES = [
+  "hack", "hacked", "exploit", "breach", "stolen", "drained", "lawsuit", "sued", "sec ",
+  "subpoena", "investigation", "banned", "delist", "delisted", "outage", "halt", "halted",
+  "vulnerability", "rug", "scam", "fraud", "charges", "lawsuit",
+];
 
+/** Classify a headline as a positive/negative catalyst (negative takes precedence). */
+export function classifyCatalyst(title: string): "positive" | "negative" | "none" {
+  const t = title.toLowerCase();
+  if (MAJOR_NEGATIVES.some(k => t.includes(k))) return "negative";
+  if (POSITIVE_CATALYSTS.some(k => t.includes(k))) return "positive";
+  return "none";
+}
+
+function check(name: string, points: number, expression: string, extra?: { actual?: number | string; threshold?: number | string }): ScoreCheck {
+  return { name, passed: points > 0, points, expression, ...extra };
+}
+
+export function scoreFundamental(row: MarketRow): { score: number; checks: ScoreCheck[] } {
+  const checks: ScoreCheck[] = [];
+
+  // Market-cap rank
+  const rank = row.marketCapRank;
+  let rankPts = 0;
+  if (rank != null && rank < 50) rankPts = 3;
+  else if (rank != null && rank < 100) rankPts = 2;
+  else if (rank != null && rank < 200) rankPts = 1;
+  checks.push(check("market_cap_rank", rankPts, rank != null ? `rank ${rank} → +${rankPts}` : "rank n/a → +0", { actual: rank ?? "n/a", threshold: "<50/<100/<200" }));
+
+  // Volume growth vs 7d avg
+  let volPts = 0;
+  let volExpr = "volume 7d avg n/a → +0";
   if (row.volume7dAvg && row.volume7dAvg > 0) {
     const ratio = row.volume24h / row.volume7dAvg;
-    if (ratio > 2) { score += 3; reasons.push(`Volume ${ratio.toFixed(1)}x 7-day average`); }
-    else if (ratio > 1.5) { score += 2; reasons.push(`Volume ${ratio.toFixed(1)}x 7-day average`); }
+    if (ratio > 2) volPts = 3;
+    else if (ratio > 1.5) volPts = 2;
+    volExpr = `volume ${ratio.toFixed(2)}x 7d avg → +${volPts}`;
   }
-  return { score, reasons };
+  checks.push(check("volume_growth", volPts, volExpr, { threshold: ">1.5x/>2x" }));
+
+  // TVL growth (30d) — DefiLlama
+  let tvlPts = 0;
+  let tvlExpr = "TVL n/a (no DeFi mapping) → +0";
+  if (row.tvlChange30dPct != null) {
+    if (row.tvlChange30dPct > 20) tvlPts = 3;
+    else if (row.tvlChange30dPct > 10) tvlPts = 2;
+    tvlExpr = `TVL ${row.tvlChange30dPct >= 0 ? "+" : ""}${row.tvlChange30dPct.toFixed(1)}% 30d → +${tvlPts}`;
+  }
+  checks.push(check("tvl_growth_30d", tvlPts, tvlExpr, { actual: row.tvlChange30dPct ?? "n/a", threshold: ">10%/>20%" }));
+
+  // Stablecoin inflows (30d) — DefiLlama (chains)
+  let stblPts = 0;
+  let stblExpr = "stablecoin inflow n/a → +0";
+  if (row.stablecoinInflow30dPct != null) {
+    if (row.stablecoinInflow30dPct > 10) stblPts = 3;
+    else if (row.stablecoinInflow30dPct > 0) stblPts = 2;
+    stblExpr = `stablecoin inflow ${row.stablecoinInflow30dPct >= 0 ? "+" : ""}${row.stablecoinInflow30dPct.toFixed(1)}% 30d → +${stblPts}`;
+  }
+  checks.push(check("stablecoin_inflow_30d", stblPts, stblExpr, { actual: row.stablecoinInflow30dPct ?? "n/a", threshold: ">0%/>10%" }));
+
+  // Ecosystem revenue trend — DefiLlama (fees/revenue)
+  let revPts = 0;
+  let revExpr = "revenue n/a → +0";
+  if (row.revenueRising != null) {
+    revPts = row.revenueRising ? 2 : 0;
+    revExpr = `revenue ${row.revenueRising ? "rising" : "flat/declining"} → +${revPts}`;
+  }
+  checks.push(check("ecosystem_revenue", revPts, revExpr));
+
+  const score = checks.reduce((s, c) => s + c.points, 0);
+  return { score, checks };
 }
 
 export function scoreNews(headlines: NewsHeadline[]): {
-  score: number; reasons: string[]; risks: string[]; hasMajorNegative: boolean;
+  score: number; checks: ScoreCheck[]; hasMajorNegative: boolean;
 } {
-  let positives = 0;
-  let negatives = 0;
+  const positives: string[] = [];
+  const negatives: string[] = [];
   for (const h of headlines) {
-    if (h.sentiment === "bullish") positives++;
-    else if (h.sentiment === "bearish") negatives++;
+    const c = classifyCatalyst(h.title);
+    if (c === "positive") positives.push(h.title);
+    else if (c === "negative") negatives.push(h.title);
   }
-  let score = Math.min(positives * SCORING.NEWS_POSITIVE_PER, SCORING.NEWS_POSITIVE_CAP);
-  score -= negatives * SCORING.NEWS_NEGATIVE_PER;
 
-  const reasons: string[] = [];
-  const risks: string[] = [];
-  if (positives > 0) reasons.push(`${positives} positive headline${positives > 1 ? "s" : ""}`);
-  if (negatives > 0) risks.push(`${negatives} negative headline${negatives > 1 ? "s" : ""}`);
-  return { score, reasons, risks, hasMajorNegative: negatives > 0 };
+  const posPoints = Math.min(positives.length * SCORING.NEWS_POSITIVE_PER, SCORING.NEWS_POSITIVE_CAP);
+  const raw = posPoints - negatives.length * SCORING.NEWS_NEGATIVE_PER;
+  const score = Math.max(raw, SCORING.NEWS_FLOOR);
+  const negPoints = score - posPoints; // keeps check points summing to score (reflects the floor)
+
+  const checks: ScoreCheck[] = [
+    check(
+      "positive_catalysts",
+      posPoints,
+      `${positives.length} positive catalyst${positives.length !== 1 ? "s" : ""}${positives.length ? ` (${positives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → +${posPoints}`,
+      { actual: positives.length, threshold: `+2 ea, cap ${SCORING.NEWS_POSITIVE_CAP}` }
+    ),
+    {
+      name: "negative_events",
+      passed: negatives.length === 0,
+      points: negPoints,
+      expression: `${negatives.length} negative event${negatives.length !== 1 ? "s" : ""}${negatives.length ? ` (${negatives.slice(0, 2).join("; ").slice(0, 80)})` : ""} → ${negPoints}${raw < SCORING.NEWS_FLOOR ? ` (floored at ${SCORING.NEWS_FLOOR})` : ""}`,
+      actual: negatives.length,
+      threshold: `-3 ea, floor ${SCORING.NEWS_FLOOR}`,
+    },
+  ];
+
+  return { score, checks, hasMajorNegative: negatives.length > 0 };
 }
 
 export function scoreTechnical(candles: Candle[], row: MarketRow): {
-  score: number; reasons: string[]; risks: string[];
+  score: number; checks: ScoreCheck[];
   rsi: number | null; ema20: number | null; ema50: number | null; ema200: number | null;
 } {
-  const reasons: string[] = [];
-  const risks: string[] = [];
+  const checks: ScoreCheck[] = [];
   const closes = candles.map(c => c.close);
   const price = closes.length ? closes[closes.length - 1] : 0;
 
@@ -117,52 +217,65 @@ export function scoreTechnical(candles: Candle[], row: MarketRow): {
   const ema200 = lastFinite(ema200arr);
   const rsi = lastFinite(rsiArr);
 
-  let score = 0;
-
   // Trend
-  if (ema200 != null && price > ema200) { score += 3; reasons.push("Price above EMA200"); }
-  if (ema50 != null && ema200 != null && ema50 > ema200) { score += 3; reasons.push("EMA50 above EMA200"); }
+  const aboveEma200 = ema200 != null && price > ema200;
+  checks.push(check("price_above_ema200", aboveEma200 ? 3 : 0, ema200 != null ? `price ${price.toFixed(4)} ${aboveEma200 ? ">" : "≤"} EMA200 ${ema200.toFixed(4)} → +${aboveEma200 ? 3 : 0}` : "EMA200 n/a → +0"));
+
+  const goldenCross = ema50 != null && ema200 != null && ema50 > ema200;
+  checks.push(check("ema50_above_ema200", goldenCross ? 3 : 0, ema50 != null && ema200 != null ? `EMA50 ${ema50.toFixed(4)} ${goldenCross ? ">" : "≤"} EMA200 ${ema200.toFixed(4)} → +${goldenCross ? 3 : 0}` : "EMA50/200 n/a → +0"));
+
+  let risingPts = 0;
+  let risingExpr = "EMA200 rising n/a → +0";
   if (ema200 != null) {
     const idx = ema200arr.length - 1;
-    const priorIdx = idx - SCORING.EMA200_RISING_LOOKBACK;
-    const prior = priorIdx >= 0 ? ema200arr[priorIdx] : NaN;
-    if (Number.isFinite(prior) && ema200 > prior) { score += 2; reasons.push("EMA200 rising"); }
+    const prior = idx - SCORING.EMA200_RISING_LOOKBACK >= 0 ? ema200arr[idx - SCORING.EMA200_RISING_LOOKBACK] : NaN;
+    if (Number.isFinite(prior)) {
+      const rising = ema200 > prior;
+      risingPts = rising ? 2 : 0;
+      risingExpr = `EMA200 ${rising ? "rising" : "flat/falling"} (vs ${SCORING.EMA200_RISING_LOOKBACK}h ago) → +${risingPts}`;
+    }
   }
+  checks.push(check("ema200_rising", risingPts, risingExpr));
 
   // Momentum
+  let rsiPts = 0;
+  let rsiExpr = "RSI n/a → +0";
   if (rsi != null) {
-    if (rsi >= 40 && rsi <= 65) { score += 2; reasons.push(`RSI ${rsi.toFixed(0)} (40–65)`); }
-    else if (rsi > 65 && rsi <= 75) { score += 1; reasons.push(`RSI ${rsi.toFixed(0)} (65–75)`); }
-    else if (rsi > 80) { score -= 3; risks.push(`RSI ${rsi.toFixed(0)} overbought (>80)`); }
+    if (rsi >= 40 && rsi <= 65) rsiPts = 2;
+    else if (rsi > 65 && rsi <= 75) rsiPts = 1;
+    else if (rsi > 80) rsiPts = -3;
+    rsiExpr = `RSI ${rsi.toFixed(0)} → ${rsiPts >= 0 ? "+" : ""}${rsiPts}`;
   }
+  checks.push(check("rsi_momentum", rsiPts, rsiExpr, { actual: rsi ?? "n/a" }));
 
   // Pullback entry (independent, per spec)
-  if (ema20 != null && price > 0 && Math.abs(price - ema20) / ema20 <= SCORING.NEAR_EMA_PCT) {
-    score += 2; reasons.push("Pullback near EMA20");
-  }
-  if (ema50 != null && price > 0 && Math.abs(price - ema50) / ema50 <= SCORING.NEAR_EMA_PCT) {
-    score += 3; reasons.push("Pullback near EMA50");
-  }
+  const nearEma20 = ema20 != null && price > 0 && Math.abs(price - ema20) / ema20 <= SCORING.NEAR_EMA_PCT;
+  checks.push(check("pullback_near_ema20", nearEma20 ? 2 : 0, ema20 != null ? `price ${nearEma20 ? "near" : "off"} EMA20 → +${nearEma20 ? 2 : 0}` : "EMA20 n/a → +0"));
+  const nearEma50 = ema50 != null && price > 0 && Math.abs(price - ema50) / ema50 <= SCORING.NEAR_EMA_PCT;
+  checks.push(check("pullback_near_ema50", nearEma50 ? 3 : 0, ema50 != null ? `price ${nearEma50 ? "near" : "off"} EMA50 → +${nearEma50 ? 3 : 0}` : "EMA50 n/a → +0"));
 
-  // Risk (overextended)
-  if (row.change24hPct > 20) { score -= 3; risks.push(`Up ${row.change24hPct.toFixed(0)}% in 24h`); }
-  if (row.change7dPct > 40) { score -= 2; risks.push(`Up ${row.change7dPct.toFixed(0)}% in 7d`); }
+  // Overextension risk
+  const risk24 = row.change24hPct > 20 ? -3 : 0;
+  checks.push(check("risk_24h", risk24, `24h ${row.change24hPct >= 0 ? "+" : ""}${row.change24hPct.toFixed(0)}% → ${risk24}`, { actual: row.change24hPct, threshold: ">20%" }));
+  const risk7 = row.change7dPct > 40 ? -2 : 0;
+  checks.push(check("risk_7d", risk7, `7d ${row.change7dPct >= 0 ? "+" : ""}${row.change7dPct.toFixed(0)}% → ${risk7}`, { actual: row.change7dPct, threshold: ">40%" }));
 
-  return { score, reasons, risks, rsi, ema20, ema50, ema200 };
+  const score = checks.reduce((s, c) => s + c.points, 0);
+  return { score, checks, rsi, ema20, ema50, ema200 };
 }
 
 export function classify(fundamental: number, technical: number, total: number, hasMajorNegativeNews: boolean): Category {
   if (
     total >= SCORING.STRONG_BUY.total &&
-    technical >= SCORING.STRONG_BUY.technical &&
     fundamental >= SCORING.STRONG_BUY.fundamental &&
+    technical >= SCORING.STRONG_BUY.technical &&
     !hasMajorNegativeNews
   ) return "STRONG_BUY";
   if (total >= SCORING.WATCHLIST_MIN) return "WATCHLIST";
   return "AVOID";
 }
 
-/** Combine all three score blocks into a single result. */
+/** Combine all three score blocks into a single result with full breakdown. */
 export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHeadline[]): ScoreResult {
   const f = scoreFundamental(row);
   const n = scoreNews(headlines);
@@ -171,18 +284,23 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
   const total = f.score + n.score + t.score;
   const category = classify(f.score, t.score, total, n.hasMajorNegative);
 
+  const checks: ScoreChecks = { fundamental: f.checks, news: n.checks, technical: t.checks };
+  const reasons = [...f.checks, ...n.checks, ...t.checks].filter(c => c.points > 0).map(c => c.expression);
+  const risks = [...t.checks, ...n.checks].filter(c => c.points < 0).map(c => c.expression);
+
   return {
     fundamental: f.score,
     news: n.score,
     technical: t.score,
     total,
     category,
-    reasons: [...f.reasons, ...n.reasons, ...t.reasons],
-    risks: [...t.risks, ...n.risks],
+    reasons,
+    risks,
     hasMajorNegativeNews: n.hasMajorNegative,
     rsi: t.rsi,
     ema20: t.ema20,
     ema50: t.ema50,
     ema200: t.ema200,
+    checks,
   };
 }

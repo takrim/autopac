@@ -1,8 +1,6 @@
 /**
- * Crypto-monitor data collection. Thin fetchers over existing services:
- *   - Coinbase hourly candles (CoinbaseBroker.getCandles)
- *   - CoinGecko market rows + 7d volume (pro API)
- *   - Google-News headlines (newsMonitor.fetchNewsForSymbol)
+ * Crypto-monitor data collection. Thin fetchers over existing services + the
+ * keyless DefiLlama API and CoinGecko's news feed.
  */
 
 import { logger } from "firebase-functions/v2";
@@ -10,8 +8,10 @@ import { getBroker } from "../../brokers";
 import { CoinbaseBroker } from "../../brokers/coinbase";
 import { fetchNewsForSymbol } from "../newsMonitor";
 import { Candle, NewsHeadline } from "./scoring";
+import { DefiLlamaRef } from "./watchlist";
 
 const CG_BASE = "https://pro-api.coingecko.com/api/v3";
+const LLAMA_BASE = "https://api.llama.fi";
 
 async function cgGet<T>(path: string): Promise<T | null> {
   const apiKey = process.env.COINGECKO_API_KEY;
@@ -35,6 +35,22 @@ async function cgGet<T>(path: string): Promise<T | null> {
   }
 }
 
+async function llamaGet<T>(path: string): Promise<T | null> {
+  try {
+    const resp = await fetch(`${LLAMA_BASE}${path}`, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) {
+      logger.warn("[CRYPTO_MONITOR] DefiLlama request failed", { path, status: resp.status });
+      return null;
+    }
+    return (await resp.json()) as T;
+  } catch (err) {
+    logger.warn("[CRYPTO_MONITOR] DefiLlama fetch error", { path, error: String(err) });
+    return null;
+  }
+}
+
+// ── CoinGecko market rows ────────────────────────────────────────────────────
+
 export interface CgMarketRow {
   id: string;
   current_price: number;
@@ -56,7 +72,7 @@ export async function fetchMarketRows(ids: string[]): Promise<Map<string, CgMark
   return map;
 }
 
-// 7d average daily volume changes slowly — cache per process for 1h to cut calls.
+// 7d average daily volume changes slowly — cache per process for 1h.
 const vol7dCache = new Map<string, { value: number | null; expiresAt: number }>();
 const VOL7D_TTL_MS = 60 * 60 * 1000;
 
@@ -75,14 +91,123 @@ export async function fetch7dAvgVolume(cgId: string): Promise<number | null> {
   return value;
 }
 
-/** Hourly candles (oldest→newest) for EMA200 headroom + RSI. */
+// ── Coinbase candles ─────────────────────────────────────────────────────────
+
 export async function fetchHourlyCandles(productId: string): Promise<Candle[]> {
   const broker = getBroker("coinbase") as CoinbaseBroker;
   const candles = await broker.getCandles(productId, "ONE_HOUR", 250);
   return candles.map(c => ({ open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume, start: c.start }));
 }
 
-export async function fetchHeadlines(symbol: string): Promise<NewsHeadline[]> {
+// ── DefiLlama fundamentals (keyless; 6h cache, slow-moving) ──────────────────
+
+export interface DefiMetrics {
+  tvlChange30dPct: number | null;
+  stablecoinInflow30dPct: number | null;
+  revenueRising: boolean | null;
+}
+
+const defiCache = new Map<string, { value: DefiMetrics; expiresAt: number }>();
+const DEFI_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** % change of a chronological daily series vs ~30 entries ago. */
+function pctChange30d(series: number[]): number | null {
+  const vals = series.filter(v => Number.isFinite(v));
+  if (vals.length < 2) return null;
+  const last = vals[vals.length - 1];
+  const past = vals[Math.max(0, vals.length - 31)];
+  if (!past) return null;
+  return ((last - past) / past) * 100;
+}
+
+export async function fetchDefiMetrics(ref?: DefiLlamaRef): Promise<DefiMetrics> {
+  const none: DefiMetrics = { tvlChange30dPct: null, stablecoinInflow30dPct: null, revenueRising: null };
+  if (!ref) return none;
+
+  const key = `${ref.kind}:${ref.slug}`;
+  const cached = defiCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const out: DefiMetrics = { ...none };
+
+  if (ref.kind === "chain") {
+    const tvl = await llamaGet<Array<{ date: number; tvl: number }>>(`/v2/historicalChainTvl/${encodeURIComponent(ref.slug)}`);
+    if (Array.isArray(tvl)) out.tvlChange30dPct = pctChange30d(tvl.map(p => p.tvl));
+
+    const stbl = await llamaGet<Array<{ totalCirculatingUSD?: Record<string, number>; totalCirculating?: Record<string, number> }>>(
+      `/stablecoincharts/${encodeURIComponent(ref.slug)}`
+    );
+    if (Array.isArray(stbl)) {
+      const series = stbl.map(p => {
+        const usd = p.totalCirculatingUSD ?? p.totalCirculating ?? {};
+        return Object.values(usd).reduce((a, b) => a + (Number(b) || 0), 0);
+      });
+      out.stablecoinInflow30dPct = pctChange30d(series);
+    }
+  } else {
+    const proto = await llamaGet<{ tvl?: Array<{ date: number; totalLiquidityUSD: number }> }>(`/protocol/${encodeURIComponent(ref.slug)}`);
+    if (proto?.tvl) out.tvlChange30dPct = pctChange30d(proto.tvl.map(p => p.totalLiquidityUSD));
+
+    const fees = await llamaGet<{ total7d?: number; total30d?: number }>(`/summary/fees/${encodeURIComponent(ref.slug)}?dataType=dailyRevenue`);
+    if (fees && typeof fees.total7d === "number" && typeof fees.total30d === "number" && fees.total30d > 0) {
+      out.revenueRising = fees.total7d / 7 > fees.total30d / 30;
+    }
+  }
+
+  defiCache.set(key, { value: out, expiresAt: Date.now() + DEFI_TTL_MS });
+  return out;
+}
+
+// ── News (newsdata.io crypto feed, per-coin Google-News fallback) ────────────
+
+const NEWSDATA_BASE = "https://newsdata.io/api/1";
+
+interface NewsDataArticle {
+  title?: string;
+  description?: string;
+  coin?: string[] | null; // symbol tags, e.g. ["btc"] (Crypto endpoint only)
+}
+
+/**
+ * Fetch newsdata.io crypto news for the watchlist in one batched call and group
+ * titles by uppercase coin symbol. Returns null when the key is missing or the
+ * request fails so callers fall back to Google-News.
+ */
+export async function fetchNewsDataHeadlines(symbols: string[]): Promise<Map<string, NewsHeadline[]> | null> {
+  const apiKey = process.env.NEWSDATA_API_KEY;
+  if (!apiKey || symbols.length === 0) return null;
+
+  const coins = symbols.map(s => s.toLowerCase()).join(",");
+  try {
+    const url = `${NEWSDATA_BASE}/crypto?apikey=${encodeURIComponent(apiKey)}&coin=${encodeURIComponent(coins)}&language=en`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) {
+      logger.warn("[CRYPTO_MONITOR] newsdata request failed", { status: resp.status });
+      return null;
+    }
+    const data = (await resp.json()) as { status?: string; results?: NewsDataArticle[] };
+    if (data.status !== "success" || !Array.isArray(data.results)) return null;
+
+    const map = new Map<string, NewsHeadline[]>();
+    for (const a of data.results) {
+      const title = `${a.title ?? ""} ${a.description ?? ""}`.trim();
+      if (!title) continue;
+      for (const c of a.coin ?? []) {
+        const key = String(c).toUpperCase();
+        const list = map.get(key) ?? [];
+        list.push({ title });
+        map.set(key, list);
+      }
+    }
+    return map;
+  } catch (err) {
+    logger.warn("[CRYPTO_MONITOR] newsdata fetch error", { error: String(err) });
+    return null;
+  }
+}
+
+/** Google-News fallback for one coin (titles only). */
+export async function fetchGoogleHeadlines(symbol: string): Promise<NewsHeadline[]> {
   const articles = await fetchNewsForSymbol(symbol);
-  return articles.map(a => ({ sentiment: a.sentiment, title: a.title }));
+  return articles.map(a => ({ title: a.title }));
 }
