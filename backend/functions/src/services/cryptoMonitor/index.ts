@@ -19,10 +19,10 @@ import { getTradingConfig, TradingConfig } from "../../api/config";
 import { executeOrder } from "../../api/trade";
 import { logDecision } from "../decisionLog";
 import { Signal } from "../../types";
-import { loadWatchlist, WatchCoin } from "./watchlist";
+import { loadWatchlistOverride, WatchCoin, DEFAULT_WATCHLIST } from "./watchlist";
 import {
   fetchMarketRows, fetch7dAvgVolume, fetchHourlyCandles,
-  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, CgMarketRow,
+  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchGainersWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
 import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
 import { formatBreakdown } from "./format";
@@ -37,6 +37,13 @@ export interface MonitorRunResult {
   scanned: number;
   alerts: number;
   lines: string[];
+}
+
+/** The active universe: manual Firestore override, else dynamic gainers (else defaults). */
+export async function resolveWatchlist(): Promise<WatchCoin[]> {
+  const override = await loadWatchlistOverride();
+  if (override) return override;
+  return fetchGainersWatchlist();
 }
 
 /** Collect + score one coin (no persistence). Shared by the run loop and /coin. */
@@ -80,7 +87,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   const notify = opts?.notify ?? true;
   const dryRun = opts?.dryRun ?? false;
 
-  let watchlist = await loadWatchlist();
+  let watchlist = await resolveWatchlist();
   if (opts?.onlySymbol) {
     const want = opts.onlySymbol.toUpperCase().replace(/-USD.*$/, "");
     watchlist = watchlist.filter(
@@ -139,12 +146,17 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   return { scanned: watchlist.length, alerts, lines };
 }
 
-/** Read-only single-coin scoring for the Telegram drill-down. */
+/** Read-only single-coin scoring for the Telegram drill-down. Works for any
+ * ticker (not just the current universe): reuses a known mapping when available,
+ * otherwise resolves the CoinGecko id by symbol. */
 export async function explainCoin(symbol: string): Promise<string | null> {
-  const watchlist = await loadWatchlist();
   const want = symbol.toUpperCase().replace(/-USD.*$/, "");
-  const coin = watchlist.find(c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === symbol.toUpperCase());
-  if (!coin) return null;
+  let coin = DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === symbol.toUpperCase());
+  if (!coin) {
+    const cgId = await searchCoinGeckoId(want);
+    if (!cgId) return null;
+    coin = { symbol: want, coinbaseProductId: `${want}-USD`, coingeckoId: cgId, defillama: DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want)?.defillama };
+  }
 
   const [marketRows, newsBySymbol] = await Promise.all([fetchMarketRows([coin.coingeckoId]), fetchNewsDataHeadlines([coin.symbol])]);
   const { result, price } = await collectAndScore(coin, marketRows.get(coin.coingeckoId), newsBySymbol);

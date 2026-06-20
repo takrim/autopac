@@ -9,8 +9,7 @@ import { BacktestRunDoc } from "../types";
 import { fetchOrderBook, scoreBook, BookLevel } from "../services/orderbook";
 import { placeManualOrder } from "../api/trade"
 import { runNewsMonitor } from "../services/newsMonitor";
-import { runCryptoMonitor, explainCoin } from "../services/cryptoMonitor";
-import { loadWatchlist } from "../services/cryptoMonitor/watchlist";
+import { runCryptoMonitor, explainCoin, resolveWatchlist } from "../services/cryptoMonitor";
 import { queryDecisions, DecisionOutcome } from "../services/decisionLog";
 import { runCgBacktest, CgBacktestInput, CgBacktestResult } from "../services/cgBacktest";
 import { runDecisionAnalyzer } from "../services/decisionAnalyzer";
@@ -700,8 +699,8 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
       res.json({ ok: true });
     } else if (lower === "/watchlist") {
       try {
-        const coins = await loadWatchlist();
-        await replyTo(chatId, `📋 Watchlist (${coins.length}):\n${coins.map(c => `• ${c.symbol} (${c.coinbaseProductId})`).join("\n")}`);
+        const coins = await resolveWatchlist();
+        await replyTo(chatId, `📋 Universe (${coins.length} — top gainers, Coinbase-tradable):\n${coins.map(c => `• ${c.symbol} (${c.coinbaseProductId})`).join("\n")}`);
       } catch (wlErr) {
         await replyTo(chatId, `❌ Watchlist read failed: ${String(wlErr).slice(0, 200)}`);
       }

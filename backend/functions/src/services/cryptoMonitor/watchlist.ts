@@ -41,8 +41,12 @@ function isValidCoin(c: unknown): c is WatchCoin {
   return !!o && typeof o.symbol === "string" && typeof o.coinbaseProductId === "string" && typeof o.coingeckoId === "string";
 }
 
-/** Load the active watchlist (Firestore override, else the default constant). */
-export async function loadWatchlist(): Promise<WatchCoin[]> {
+/**
+ * Manual watchlist override from `monitor_config/watchlist` ({ coins: [...] }).
+ * Returns null when no valid override is set, so callers fall back to the
+ * dynamic gainers universe.
+ */
+export async function loadWatchlistOverride(): Promise<WatchCoin[] | null> {
   try {
     const snap = await getFirestore().collection("monitor_config").doc("watchlist").get();
     const coins = snap.data()?.coins;
@@ -51,7 +55,7 @@ export async function loadWatchlist(): Promise<WatchCoin[]> {
       if (valid.length > 0) return valid;
     }
   } catch (err) {
-    logger.warn("[CRYPTO_MONITOR] watchlist override read failed — using default", { error: String(err) });
+    logger.warn("[CRYPTO_MONITOR] watchlist override read failed", { error: String(err) });
   }
-  return DEFAULT_WATCHLIST;
+  return null;
 }
