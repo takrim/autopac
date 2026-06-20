@@ -131,15 +131,14 @@ export function formatBeginnerBreakdown(coin: WatchCoin, r: ScoreResult, price: 
   if (goods.length) lines.push("", "✅ *In its favour:*", ...goods.map(t => `• ${t}`));
   if (bads.length) lines.push("", "⚠️ *Things to watch:*", ...bads.map(t => `• ${t}`));
 
-  // Recent news — show the actual headlines (negatives first, they matter more).
-  const posNews = r.checks.news.find(c => c.name === "positive_catalysts")?.details ?? [];
-  const negNews = r.checks.news.find(c => c.name === "negative_events")?.details ?? [];
-  lines.push("", "📰 *Recent news:*");
-  if (posNews.length || negNews.length) {
-    for (const t of negNews.slice(0, 3)) lines.push(`⚠️ ${clip(t)}`);
-    for (const t of posNews.slice(0, 3)) lines.push(`✅ ${clip(t)}`);
+  // Recent news — weighed across sources; show the actual headlines with sentiment.
+  const sentLabel: Record<string, string> = { bullish: "📈 bullish", bearish: "📉 bearish", mixed: "↔️ mixed", neutral: "• neutral" };
+  const sentIcon: Record<string, string> = { bullish: "📈", bearish: "📉", neutral: "•" };
+  lines.push("", `📰 *Recent news* — overall ${sentLabel[r.newsSentiment] ?? "• neutral"}:`);
+  if (r.newsHeadlines.length) {
+    for (const h of r.newsHeadlines.slice(0, 5)) lines.push(`${sentIcon[h.sentiment]} ${clip(h.title)}`);
   } else {
-    lines.push("_No notable headlines found recently._");
+    lines.push("_No headlines found across sources right now._");
   }
 
   lines.push("", `*Bottom line:* ${v.bottom}`);

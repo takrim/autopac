@@ -73,6 +73,8 @@ export interface ScoreResult {
   ema50: number | null;
   ema200: number | null;
   checks: ScoreChecks;
+  newsHeadlines: { title: string; sentiment: Sentiment }[]; // weighed recent news (display)
+  newsSentiment: NewsSentiment;
 }
 
 /** Single source of truth for thresholds — spec values (40-pt scale). */
@@ -104,6 +106,44 @@ export function classifyCatalyst(title: string): "positive" | "negative" | "none
   if (MAJOR_NEGATIVES.some(k => t.includes(k))) return "negative";
   if (POSITIVE_CATALYSTS.some(k => t.includes(k))) return "positive";
   return "none";
+}
+
+// Broader sentiment lexicon (display "weigh up" — separate from hard catalysts).
+const BULLISH_WORDS = [
+  "surge", "soar", "rally", "jump", "gain", "rise", "rises", "climb", "bull", "bullish", "breakout",
+  "record", "all-time high", "ath", "upgrade", "adoption", "inflow", "inflows", "accumulate", "buy",
+  "partnership", "integration", "launch", "mainnet", "institutional", "approval", "etf", "listing", "support",
+];
+const BEARISH_WORDS = [
+  "crash", "plunge", "plummet", "dump", "sell-off", "selloff", "slump", "tumble", "drop", "fall", "falls",
+  "decline", "bear", "bearish", "breakdown", "hack", "exploit", "lawsuit", "sec", "ban", "delist", "outage",
+  "halt", "liquidation", "liquidated", "fraud", "scam", "rug", "outflow", "outflows", "downgrade", "fear", "warning",
+];
+
+export type Sentiment = "bullish" | "bearish" | "neutral";
+
+/** Lightweight per-headline sentiment for display weighting. */
+export function classifySentiment(text: string): Sentiment {
+  const t = text.toLowerCase();
+  let bull = 0, bear = 0;
+  for (const w of BULLISH_WORDS) if (t.includes(w)) bull++;
+  for (const w of BEARISH_WORDS) if (t.includes(w)) bear++;
+  if (bull > bear) return "bullish";
+  if (bear > bull) return "bearish";
+  return "neutral";
+}
+
+export type NewsSentiment = "bullish" | "bearish" | "mixed" | "neutral";
+
+/** Weigh tagged headlines into an overall sentiment verdict. */
+export function weighSentiment(items: { sentiment: Sentiment }[]): NewsSentiment {
+  const bull = items.filter(i => i.sentiment === "bullish").length;
+  const bear = items.filter(i => i.sentiment === "bearish").length;
+  if (bull === 0 && bear === 0) return "neutral";
+  if (bull > 0 && bear > 0 && Math.abs(bull - bear) <= 1) return "mixed";
+  if (bull > bear) return "bullish";
+  if (bear > bull) return "bearish";
+  return "mixed";
 }
 
 function check(name: string, points: number, expression: string, extra?: { actual?: number | string; threshold?: number | string }): ScoreCheck {
@@ -294,6 +334,10 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
   const reasons = [...f.checks, ...n.checks, ...t.checks].filter(c => c.points > 0).map(c => c.expression);
   const risks = [...t.checks, ...n.checks].filter(c => c.points < 0).map(c => c.expression);
 
+  // Weigh all recent headlines (not just catalysts) for the display.
+  const newsHeadlines = headlines.map(h => ({ title: h.title, sentiment: classifySentiment(`${h.title} ${h.summary ?? ""}`) }));
+  const newsSentiment = weighSentiment(newsHeadlines);
+
   return {
     fundamental: f.score,
     news: n.score,
@@ -308,5 +352,7 @@ export function scoreCoin(candles: Candle[], row: MarketRow, headlines: NewsHead
     ema50: t.ema50,
     ema200: t.ema200,
     checks,
+    newsHeadlines,
+    newsSentiment,
   };
 }

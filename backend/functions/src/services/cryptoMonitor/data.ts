@@ -304,8 +304,23 @@ export async function fetchNewsDataHeadlines(symbols: string[]): Promise<Map<str
   }
 }
 
-/** Google-News fallback for one coin (titles only). */
+/** Google-News headlines for one coin (titles only). */
 export async function fetchGoogleHeadlines(symbol: string): Promise<NewsHeadline[]> {
   const articles = await fetchNewsForSymbol(symbol);
   return articles.map(a => ({ title: a.title }));
+}
+
+/** Merge headlines from multiple sources, de-duped by normalized title. */
+export function mergeHeadlines(...lists: NewsHeadline[][]): NewsHeadline[] {
+  const seen = new Set<string>();
+  const out: NewsHeadline[] = [];
+  for (const list of lists) {
+    for (const h of list) {
+      const key = h.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 60);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(h);
+    }
+  }
+  return out.slice(0, 12);
 }

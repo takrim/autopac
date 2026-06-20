@@ -22,7 +22,7 @@ import { Signal } from "../../types";
 import { loadWatchlistOverride, WatchCoin, DEFAULT_WATCHLIST } from "./watchlist";
 import {
   fetchMarketRows, fetch7dAvgVolume, fetchHourlyCandles,
-  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
+  fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, mergeHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
 import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
 import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "./format";
@@ -68,9 +68,10 @@ async function collectAndScore(
     fetchDefiMetrics(coin.defillama),
   ]);
 
-  // newsdata.io primary; per-coin Google-News fallback when it has nothing tagged.
-  const fromNewsData = newsBySymbol?.get(coin.symbol.toUpperCase());
-  const headlines = fromNewsData && fromNewsData.length ? fromNewsData : await fetchGoogleHeadlines(coin.symbol);
+  // Aggregate multiple sources (newsdata.io + Google News), de-duped, for coverage.
+  const fromNewsData = newsBySymbol?.get(coin.symbol.toUpperCase()) ?? [];
+  const fromGoogle = await fetchGoogleHeadlines(coin.symbol);
+  const headlines = mergeHeadlines(fromNewsData, fromGoogle);
 
   const row: MarketRow = {
     marketCapRank: marketRow?.market_cap_rank ?? null,

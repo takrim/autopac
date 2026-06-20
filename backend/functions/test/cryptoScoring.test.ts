@@ -4,6 +4,8 @@ import {
   scoreTechnical,
   classify,
   classifyCatalyst,
+  classifySentiment,
+  weighSentiment,
   scoreCoin,
   SCORING,
   Candle,
@@ -79,6 +81,28 @@ describe("classifyCatalyst", () => {
     expect(classifyCatalyst("Exchange hacked, funds stolen")).toBe("negative");
     expect(classifyCatalyst("SEC charges firm with fraud")).toBe("negative"); // negative wins over any positive
     expect(classifyCatalyst("Price trades sideways in quiet session")).toBe("none");
+  });
+});
+
+describe("weighed sentiment (display)", () => {
+  test("classifySentiment tags bullish/bearish/neutral", () => {
+    expect(classifySentiment("Solana price surges as volume climbs")).toBe("bullish");
+    expect(classifySentiment("Token plunges after exchange hack")).toBe("bearish");
+    expect(classifySentiment("Project releases quarterly report")).toBe("neutral");
+  });
+
+  test("weighSentiment aggregates a verdict", () => {
+    expect(weighSentiment([{ sentiment: "bullish" }, { sentiment: "bullish" }, { sentiment: "neutral" }])).toBe("bullish");
+    expect(weighSentiment([{ sentiment: "bearish" }, { sentiment: "bearish" }])).toBe("bearish");
+    expect(weighSentiment([{ sentiment: "bullish" }, { sentiment: "bearish" }])).toBe("mixed");
+    expect(weighSentiment([{ sentiment: "neutral" }])).toBe("neutral");
+  });
+
+  test("scoreCoin attaches weighed headlines for any news (not just catalysts)", () => {
+    const r = scoreCoin([], baseRow, [h("Coin surges on strong volume"), h("Minor delay announced")]);
+    expect(r.newsHeadlines.length).toBe(2);
+    expect(r.newsHeadlines[0].sentiment).toBe("bullish");
+    expect(["bullish", "mixed", "neutral", "bearish"]).toContain(r.newsSentiment);
   });
 });
 
