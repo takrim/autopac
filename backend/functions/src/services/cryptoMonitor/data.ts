@@ -8,6 +8,7 @@ import { getBroker } from "../../brokers";
 import { CoinbaseBroker } from "../../brokers/coinbase";
 import { fetchNewsForSymbol } from "../newsMonitor";
 import { sendTelegramMessage } from "../telegram";
+import { cgFetchCategories, FORBIDDEN_CATEGORY_REGEX } from "../../webhooks/tradingview";
 import { Candle, NewsHeadline } from "./scoring";
 import { DefiLlamaRef, WatchCoin, DEFAULT_WATCHLIST } from "./watchlist";
 
@@ -113,34 +114,49 @@ export async function fetchHourlyCandles(productId: string): Promise<Candle[]> {
 
 // ── Dynamic gainers universe ─────────────────────────────────────────────────
 
-const GAINERS_LIMIT = 20; // how many coins the monitor scores per run
-const GAINERS_MAX_RANK = 500; // quality floor — ignore micro-caps
-const GAINERS_PROBE_CAP = 60; // max Coinbase tradability probes per run
+const GAINERS_LIMIT = 25; // how many coins the monitor scores per run (top 20–30)
+const GAINERS_CANDIDATES = 50; // Coinbase gainers to consider before category filtering
 const STABLE_SYMBOLS = new Set(["USDT", "USDC", "DAI", "USDE", "FDUSD", "TUSD", "USDD", "PYUSD", "USDS", "BUSD", "GUSD", "USD"]);
 
+// CoinGecko category/id lookups change slowly — cache per symbol for 24h.
+const catCache = new Map<string, { id: string | null; categories: string[] | null; expiresAt: number }>();
+const CAT_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function resolveCategory(symbol: string): Promise<{ id: string | null; categories: string[] | null }> {
+  const cached = catCache.get(symbol);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+  const res = await cgFetchCategories(symbol);
+  catCache.set(symbol, { ...res, expiresAt: Date.now() + CAT_TTL_MS });
+  return res;
+}
+
 /**
- * Build the watchlist from CoinGecko's top 24h gainers (within the top-250 by
- * market cap, for quality), keeping only Coinbase-tradable, non-stablecoin coins.
- * DefiLlama slugs are reused from DEFAULT_WATCHLIST when the coin is known.
- * Returns an empty list (no hardcoded fallback) if the feed is unavailable.
+ * Build the watchlist from Coinbase's top 24h gainers (native — guaranteed
+ * tradable), excluding stablecoins and any coin whose CoinGecko categories match
+ * defi/meme. Resolves the CoinGecko id along the way (needed for scoring) and
+ * reuses DefiLlama slugs from DEFAULT_WATCHLIST when known. Coins whose category
+ * can't be verified are skipped (fail-closed). Returns an empty list (no
+ * hardcoded fallback) and alerts via Telegram if the Coinbase feed is down.
  */
 export async function fetchGainersWatchlist(limit = GAINERS_LIMIT): Promise<WatchCoin[]> {
+  const broker = getBroker("coinbase") as CoinbaseBroker;
+
   const MAX_ATTEMPTS = 3;
-  let rows: CgMarketRow[] | null = null;
+  let gainers: Array<{ productId: string; symbol: string; change24h: number }> = [];
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    rows = await cgGet<CgMarketRow[]>(
-      "/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&price_change_percentage=24h,7d"
-    );
-    if (rows && rows.length > 0) break;
-    if (attempt < MAX_ATTEMPTS) {
-      logger.warn("[CRYPTO_MONITOR] gainers feed attempt failed — retrying", { attempt });
-      await sleep(1500 * attempt);
+    try {
+      const res = await broker.getMarketGainers(GAINERS_CANDIDATES);
+      gainers = res.topGainers ?? [];
+    } catch (err) {
+      logger.warn("[CRYPTO_MONITOR] Coinbase gainers attempt failed", { attempt, error: String(err) });
     }
+    if (gainers.length > 0) break;
+    if (attempt < MAX_ATTEMPTS) await sleep(1500 * attempt);
   }
-  if (!rows || rows.length === 0) {
-    logger.error("[CRYPTO_MONITOR] gainers feed unavailable after retries");
+  if (gainers.length === 0) {
+    logger.error("[CRYPTO_MONITOR] Coinbase gainers feed unavailable after retries");
     await sendTelegramMessage(
-      `⚠️ *Crypto Monitor* — CoinGecko gainers feed unavailable after ${MAX_ATTEMPTS} attempts. No universe scored this run.`
+      `⚠️ *Crypto Monitor* — Coinbase gainers feed unavailable after ${MAX_ATTEMPTS} attempts. No universe scored this run.`
     ).catch(() => {});
     return [];
   }
@@ -149,25 +165,19 @@ export async function fetchGainersWatchlist(limit = GAINERS_LIMIT): Promise<Watc
     DEFAULT_WATCHLIST.filter(c => c.defillama).map(c => [c.symbol.toUpperCase(), c.defillama!])
   );
 
-  const candidates = rows
-    .filter(r => r.market_cap_rank != null && r.market_cap_rank <= GAINERS_MAX_RANK)
-    .filter(r => (r.price_change_percentage_24h_in_currency ?? 0) > 0)
-    .filter(r => r.symbol && !STABLE_SYMBOLS.has(r.symbol.toUpperCase()))
-    .sort((a, b) => (b.price_change_percentage_24h_in_currency ?? 0) - (a.price_change_percentage_24h_in_currency ?? 0))
-    .slice(0, GAINERS_PROBE_CAP);
+  const sorted = gainers
+    .filter(g => g.symbol && !STABLE_SYMBOLS.has(g.symbol.toUpperCase()))
+    .sort((a, b) => b.change24h - a.change24h);
 
-  const broker = getBroker("coinbase") as CoinbaseBroker;
   const out: WatchCoin[] = [];
-  for (const r of candidates) {
+  for (const g of sorted) {
     if (out.length >= limit) break;
-    const symbol = (r.symbol ?? "").toUpperCase();
-    if (!symbol) continue;
-    let tradable = false;
-    try {
-      tradable = broker.assetExists ? await broker.assetExists(`${symbol}-USD`) : false;
-    } catch { /* skip on probe error */ }
-    if (!tradable) continue;
-    out.push({ symbol, coinbaseProductId: `${symbol}-USD`, coingeckoId: r.id, defillama: defiBySymbol.get(symbol) });
+    const symbol = g.symbol.toUpperCase();
+    const { id, categories } = await resolveCategory(symbol);
+    if (!id) continue; // need a CoinGecko id to score
+    if (categories === null) continue; // category unverifiable — fail-closed
+    if (categories.some(c => FORBIDDEN_CATEGORY_REGEX.test(c))) continue; // exclude defi/meme
+    out.push({ symbol, coinbaseProductId: g.productId, coingeckoId: id, defillama: defiBySymbol.get(symbol) });
   }
 
   return out;
