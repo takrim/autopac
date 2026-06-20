@@ -25,7 +25,7 @@ import {
   fetchDefiMetrics, fetchNewsDataHeadlines, fetchGoogleHeadlines, fetchMoversWatchlist, searchCoinGeckoId, CgMarketRow,
 } from "./data";
 import { scoreCoin, MarketRow, ScoreResult, Category } from "./scoring";
-import { formatBreakdown } from "./format";
+import { formatBreakdown, formatBeginnerBreakdown } from "./format";
 
 const db = getFirestore();
 const METRICS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -148,8 +148,9 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
 
 /** Read-only single-coin scoring for the Telegram drill-down. Works for any
  * ticker (not just the current universe): reuses a known mapping when available,
- * otherwise resolves the CoinGecko id by symbol. */
-export async function explainCoin(symbol: string): Promise<string | null> {
+ * otherwise resolves the CoinGecko id by symbol. `detailed` returns the technical
+ * check-by-check view; the default is the beginner-friendly summary. */
+export async function explainCoin(symbol: string, detailed = false): Promise<string | null> {
   const want = symbol.toUpperCase().replace(/-USD.*$/, "");
   let coin = DEFAULT_WATCHLIST.find(c => c.symbol.toUpperCase() === want || c.coinbaseProductId.toUpperCase() === symbol.toUpperCase());
   if (!coin) {
@@ -160,7 +161,7 @@ export async function explainCoin(symbol: string): Promise<string | null> {
 
   const [marketRows, newsBySymbol] = await Promise.all([fetchMarketRows([coin.coingeckoId]), fetchNewsDataHeadlines([coin.symbol])]);
   const { result, price } = await collectAndScore(coin, marketRows.get(coin.coingeckoId), newsBySymbol);
-  return formatBreakdown(coin, result, price);
+  return detailed ? formatBreakdown(coin, result, price) : formatBeginnerBreakdown(coin, result, price);
 }
 
 async function reconcileAlert(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig): Promise<boolean> {

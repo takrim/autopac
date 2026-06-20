@@ -683,14 +683,16 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
       }
       res.json({ ok: true });
     } else if (lower === "/coin" || lower.startsWith("/coin ")) {
-      const arg = text.trim().split(/\s+/)[1];
+      const parts = text.trim().split(/\s+/);
+      const arg = parts[1];
+      const detailed = (parts[2] || "").toLowerCase() === "full";
       if (!arg) {
-        await replyTo(chatId, "Usage: /coin <symbol>\nExample: /coin SOL");
+        await replyTo(chatId, "Usage: /coin <symbol> [full]\nExample: /coin SOL  (plain-English)\n         /coin SOL full  (the numbers)");
       } else {
         await replyTo(chatId, `⏳ Scoring ${arg.toUpperCase()}...`);
         try {
-          const breakdown = await explainCoin(arg);
-          await replyTo(chatId, breakdown ?? `❓ ${arg.toUpperCase()} is not in the watchlist. Try /watchlist.`);
+          const breakdown = await explainCoin(arg, detailed);
+          await replyTo(chatId, breakdown ?? `❓ Could not find ${arg.toUpperCase()} on CoinGecko/Coinbase.`);
         } catch (coinErr) {
           logger.error("[TG_WEBHOOK] /coin failed", { error: String(coinErr) });
           await replyTo(chatId, `❌ Breakdown failed: ${String(coinErr).slice(0, 200)}`);
@@ -919,9 +921,9 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "  Run the crypto buy-signal monitor now (whole watchlist, or one coin).",
         "  Example: /scan SOL",
         "",
-        "*/coin* <symbol>",
-        "  Detailed score breakdown for one coin (how the calc happened).",
-        "  Example: /coin SOL",
+        "*/coin* <symbol> [full]",
+        "  Plain-English buy analysis for one coin. Add 'full' for the numbers.",
+        "  Example: /coin SOL   ·   /coin SOL full",
         "",
         "*/watchlist*",
         "  Show the coins the monitor tracks.",
