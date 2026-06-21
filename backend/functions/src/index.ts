@@ -131,13 +131,13 @@ export const tgbot = onRequest(
   tgbotApp
 );
 
-// Crypto buy-signal monitor — every 15 minutes.
-// Scores the watchlist on fundamental + news + technical factors and emits
-// Telegram/push buy alerts (notify-only; never places an order).
+// Crypto buy-signal monitor — every 5 minutes.
+// Scores the watchlist via the separate strategies, emits the highest-priority
+// alert (Telegram/push), and auto-buys on a fresh STRONG_BUY when MONITOR_AUTO_BUY.
 export const cryptoMonitor = onSchedule(
   {
     region: "us-central1",
-    schedule: "every 15 minutes",
+    schedule: "every 5 minutes",
     timeoutSeconds: 300,
     maxInstances: 1,
     secrets: ["COINBASE_API_KEY", "COINBASE_API_SECRET", "COINGECKO_API_KEY", "NEWSDATA_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
