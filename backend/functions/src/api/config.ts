@@ -39,7 +39,7 @@ const DEFAULTS: TradingConfig = {
   PNL_RESET_DATE: null,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
-    coinbase: { tradeValueUsd: 1000, allowedSymbols: [] },
+    coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
   },
 };
 
