@@ -265,43 +265,64 @@ interface NewsDataArticle {
   coin?: string[] | null; // symbol tags, e.g. ["btc"] (Crypto endpoint only)
 }
 
+// Per-symbol newsdata cache so frequent (5-min) runs stay within the free tier
+// (~200/day). A symbol is refetched at most once per TTL; stale symbols across a
+// run are batched into a single call.
+const newsDataCache = new Map<string, { headlines: NewsHeadline[]; expiresAt: number }>();
+const NEWSDATA_TTL_MS = 30 * 60 * 1000;
+
 /**
- * Fetch newsdata.io crypto news for the watchlist in one batched call and group
- * titles by uppercase coin symbol. Returns null when the key is missing or the
- * request fails so callers fall back to Google-News.
+ * Fetch newsdata.io crypto news grouped by uppercase coin symbol, cached 30 min
+ * per symbol. Only stale symbols are fetched (batched). Returns null only when no
+ * key is set; otherwise returns the cache-backed map (callers still merge Google).
  */
 export async function fetchNewsDataHeadlines(symbols: string[]): Promise<Map<string, NewsHeadline[]> | null> {
   const apiKey = process.env.NEWSDATA_API_KEY;
   if (!apiKey || symbols.length === 0) return null;
 
-  const coins = symbols.map(s => s.toLowerCase()).join(",");
-  try {
-    const url = `${NEWSDATA_BASE}/crypto?apikey=${encodeURIComponent(apiKey)}&coin=${encodeURIComponent(coins)}&language=en`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!resp.ok) {
-      logger.warn("[CRYPTO_MONITOR] newsdata request failed", { status: resp.status });
-      return null;
-    }
-    const data = (await resp.json()) as { status?: string; results?: NewsDataArticle[] };
-    if (data.status !== "success" || !Array.isArray(data.results)) return null;
+  const now = Date.now();
+  const wanted = symbols.map(s => s.toUpperCase());
+  const stale = wanted.filter(s => { const c = newsDataCache.get(s); return !c || c.expiresAt <= now; });
 
-    const map = new Map<string, NewsHeadline[]>();
-    for (const a of data.results) {
-      const title = (a.title ?? "").trim();
-      if (!title) continue;
-      const summary = (a.description ?? "").trim() || undefined;
-      for (const c of a.coin ?? []) {
-        const key = String(c).toUpperCase();
-        const list = map.get(key) ?? [];
-        list.push({ title, summary });
-        map.set(key, list);
+  if (stale.length > 0) {
+    const coins = stale.map(s => s.toLowerCase()).join(",");
+    let fresh: Map<string, NewsHeadline[]> | null = null;
+    try {
+      const url = `${NEWSDATA_BASE}/crypto?apikey=${encodeURIComponent(apiKey)}&coin=${encodeURIComponent(coins)}&language=en`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (resp.ok) {
+        const data = (await resp.json()) as { status?: string; results?: NewsDataArticle[] };
+        if (data.status === "success" && Array.isArray(data.results)) {
+          fresh = new Map<string, NewsHeadline[]>();
+          for (const a of data.results) {
+            const title = (a.title ?? "").trim();
+            if (!title) continue;
+            const summary = (a.description ?? "").trim() || undefined;
+            for (const c of a.coin ?? []) {
+              const key = String(c).toUpperCase();
+              const list = fresh.get(key) ?? [];
+              list.push({ title, summary });
+              fresh.set(key, list);
+            }
+          }
+        }
+      } else {
+        logger.warn("[CRYPTO_MONITOR] newsdata request failed", { status: resp.status });
       }
+    } catch (err) {
+      logger.warn("[CRYPTO_MONITOR] newsdata fetch error", { error: String(err) });
     }
-    return map;
-  } catch (err) {
-    logger.warn("[CRYPTO_MONITOR] newsdata fetch error", { error: String(err) });
-    return null;
+    // Cache every stale symbol (results or empty) so we don't refetch until TTL —
+    // even on failure, which conserves the daily budget (Google fills the gap).
+    for (const s of stale) newsDataCache.set(s, { headlines: fresh?.get(s) ?? [], expiresAt: now + NEWSDATA_TTL_MS });
   }
+
+  const map = new Map<string, NewsHeadline[]>();
+  for (const s of wanted) {
+    const c = newsDataCache.get(s);
+    if (c && c.headlines.length) map.set(s, c.headlines);
+  }
+  return map;
 }
 
 /** Google-News headlines for one coin (titles only). */
