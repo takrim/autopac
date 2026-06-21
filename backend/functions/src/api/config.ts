@@ -22,6 +22,7 @@ export interface TradingConfig {
   MAX_DAILY_TRADES: number;
   ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
   PNL_RESET_DATE: number | null; // epoch ms — ignore fills before this timestamp
+  MONITOR_AUTO_BUY: boolean; // crypto monitor auto-buys on a STRONG_BUY strategy alert
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -37,6 +38,7 @@ const DEFAULTS: TradingConfig = {
   MAX_DAILY_TRADES: 50,
   ORDER_MODE: "BOTH",
   PNL_RESET_DATE: null,
+  MONITOR_AUTO_BUY: true,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
@@ -154,6 +156,7 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "ORDER_PYRAMID",
   "MAX_DAILY_TRADES",
   "ORDER_MODE",
+  "MONITOR_AUTO_BUY",
   "brokerSettings",
 ];
 
