@@ -14,6 +14,7 @@ import crypto from "crypto";
 import { sendTelegramMessage } from "../telegram";
 import { sendCryptoBuyAlertNotification } from "../notification";
 import { getBroker } from "../../brokers";
+import { CoinbaseBroker } from "../../brokers/coinbase";
 import { getTradingConfig, TradingConfig } from "../../api/config";
 import { executeOrder } from "../../api/trade";
 import { logDecision } from "../decisionLog";
@@ -27,6 +28,7 @@ import { scoreCoin, MarketRow, ScoreResult } from "./scoring";
 import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "./format";
 import {
   evaluateAll, selectAlert, StrategyResult, StrategyConfig, STRATEGY_DEFAULTS, STRATEGY_PRIORITY, AlertType,
+  shouldStack, gainPct,
 } from "./strategies";
 
 const db = getFirestore();
@@ -129,6 +131,14 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   }
 
   const tradingConfig = await getTradingConfig();
+
+  // Take-profit sweep over ALL held Coinbase positions (full scheduled runs only).
+  if (!dryRun && !opts?.onlySymbol && tradingConfig.MONITOR_AUTO_BUY) {
+    await runTakeProfit(tradingConfig, notify).catch(err =>
+      logger.error("[CRYPTO_MONITOR] take-profit sweep failed", { error: String(err) })
+    );
+  }
+
   const [marketRows, newsBySymbol] = await Promise.all([
     fetchMarketRows(watchlist.map(c => c.coingeckoId)),
     fetchNewsDataHeadlines(watchlist.map(c => c.symbol)),
@@ -300,23 +310,61 @@ async function notifyAlert(
 }
 
 /**
+ * Sell any held Coinbase position that's ≥ MONITOR_TAKE_PROFIT_PCT above its
+ * average entry price. Runs once per scheduled full run.
+ */
+async function runTakeProfit(cfg: TradingConfig, notify: boolean): Promise<void> {
+  const broker = getBroker("coinbase") as CoinbaseBroker;
+  const positions = await broker.getDetailedPositions();
+  for (const p of positions) {
+    const avg = parseFloat(String(p.avg_entry_price) || "0");
+    const cur = parseFloat(String(p.current_price) || "0");
+    const pct = gainPct(avg, cur);
+    if (pct == null || pct < cfg.MONITOR_TAKE_PROFIT_PCT) continue;
+
+    const symbol = String(p.symbol);
+    try {
+      const result = await broker.liquidatePosition(symbol);
+      logger.info("[CRYPTO_MONITOR] take-profit sold", { symbol, pct: pct.toFixed(2) });
+      await logDecision({
+        source: "auto_approve",
+        outcome: "ACCEPTED",
+        action: "SELL",
+        symbol,
+        price: cur,
+        reason: `Take-profit +${pct.toFixed(2)}% ≥ ${cfg.MONITOR_TAKE_PROFIT_PCT}%`,
+        expression: `(${cur} - ${avg}) / ${avg} = +${pct.toFixed(2)}%`,
+        params: { result },
+      });
+      if (notify) await sendTelegramMessage(`💰 *Take-profit SOLD* ${symbol} +${pct.toFixed(2)}% (entry ${avg}, now ${cur})`).catch(() => {});
+    } catch (err) {
+      logger.error("[CRYPTO_MONITOR] take-profit sell failed", { symbol, error: String(err) });
+      if (notify) await sendTelegramMessage(`❌ *Take-profit sell failed* ${symbol}: ${String(err).slice(0, 150)}`).catch(() => {});
+    }
+  }
+}
+
+/**
  * Place a buy mirroring the bulltrend path (pyramid + risk gated). `execute`
  * decides whether to actually place the order (else store a PENDING signal).
  * Used by the scheduled STRONG_BUY auto-buy (gated by MONITOR_AUTO_BUY) and the
  * `/scan <sym> live force` manual test.
  */
 async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig, execute = false, tag = "Crypto monitor BUY"): Promise<void> {
-  // Pyramid guard — skip if already holding.
-  if (!cfg.ORDER_PYRAMID) {
-    try {
-      const existing = await getBroker("coinbase").getPosition(coin.coinbaseProductId);
-      if (existing && existing.qty > 0) {
-        logger.info("[CRYPTO_MONITOR] auto-buy skipped — already holding", { symbol: coin.symbol, qty: existing.qty });
-        return;
-      }
-    } catch (err) {
-      logger.warn("[CRYPTO_MONITOR] pyramid check failed, allowing buy", { symbol: coin.symbol, error: String(err) });
+  const tradeValueUsd = cfg.brokerSettings?.coinbase?.tradeValueUsd || cfg.TRADE_VALUE_USD;
+
+  // DCA stacking: buy $X each time, up to MONITOR_STACK_MAX_USD invested per coin.
+  try {
+    const positions = await (getBroker("coinbase") as CoinbaseBroker).getDetailedPositions();
+    const pos = positions.find(p => String(p.symbol).toUpperCase() === coin.coinbaseProductId.toUpperCase());
+    const costBasis = pos ? parseFloat(String(pos.cost_basis) || "0") : 0;
+    if (!shouldStack(costBasis, tradeValueUsd, cfg.MONITOR_STACK_MAX_USD)) {
+      logger.info("[CRYPTO_MONITOR] stack cap reached — skipping", { symbol: coin.symbol, costBasis, max: cfg.MONITOR_STACK_MAX_USD });
+      if (notify) await sendTelegramMessage(`⏸ *${tag} skipped* ${coin.symbol} — already ~$${costBasis.toFixed(0)} invested (max $${cfg.MONITOR_STACK_MAX_USD})`).catch(() => {});
+      return;
     }
+  } catch (err) {
+    logger.warn("[CRYPTO_MONITOR] stack check failed, allowing buy", { symbol: coin.symbol, error: String(err) });
   }
 
   const entryPrice = price > 0 ? price : 0;

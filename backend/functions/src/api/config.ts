@@ -23,6 +23,8 @@ export interface TradingConfig {
   ORDER_MODE: "STRATEGY" | "RSI" | "BOTH";
   PNL_RESET_DATE: number | null; // epoch ms — ignore fills before this timestamp
   MONITOR_AUTO_BUY: boolean; // crypto monitor auto-buys on a STRONG_BUY strategy alert
+  MONITOR_STACK_MAX_USD: number; // max total invested per coin via DCA stacking
+  MONITOR_TAKE_PROFIT_PCT: number; // auto-sell a held coin once it's this % above entry
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -39,6 +41,8 @@ const DEFAULTS: TradingConfig = {
   ORDER_MODE: "BOTH",
   PNL_RESET_DATE: null,
   MONITOR_AUTO_BUY: true,
+  MONITOR_STACK_MAX_USD: 100,
+  MONITOR_TAKE_PROFIT_PCT: 4,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
@@ -157,6 +161,8 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "MAX_DAILY_TRADES",
   "ORDER_MODE",
   "MONITOR_AUTO_BUY",
+  "MONITOR_STACK_MAX_USD",
+  "MONITOR_TAKE_PROFIT_PCT",
   "brokerSettings",
 ];
 

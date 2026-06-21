@@ -2,6 +2,7 @@ import { ScoreResult } from "../src/services/cryptoMonitor/scoring";
 import {
   evaluateFundamentalWatch, evaluateAccumulationSetup, evaluateBuySetup, evaluateStrongBuy,
   evaluateMomentumBreakout, evaluatePullbackBuyZone, evaluateRiskBlock, evaluateAll, selectAlert,
+  shouldStack, gainPct,
 } from "../src/services/cryptoMonitor/strategies";
 
 /** Minimal scorecard factory — only the fields strategies read need to be set. */
@@ -64,6 +65,23 @@ describe("PULLBACK_BUY_ZONE", () => {
 describe("RISK_BLOCK", () => {
   test("major bearish => triggers", () => expect(evaluateRiskBlock(mk({ majorBearish: true })).triggered).toBe(true));
   test("no major => no", () => expect(evaluateRiskBlock(mk({ majorBearish: false })).triggered).toBe(false));
+});
+
+describe("stacking + take-profit helpers", () => {
+  test("shouldStack: DCA up to the cap, then stop", () => {
+    expect(shouldStack(0, 10, 100)).toBe(true);    // first buy
+    expect(shouldStack(80, 10, 100)).toBe(true);   // 80 + 10 = 90 ≤ 100
+    expect(shouldStack(90, 10, 100)).toBe(true);   // 90 + 10 = 100 ≤ 100
+    expect(shouldStack(95, 10, 100)).toBe(false);  // 95 + 10 = 105 > 100
+    expect(shouldStack(100, 10, 100)).toBe(false);
+  });
+
+  test("gainPct: percent above entry", () => {
+    expect(gainPct(100, 104)).toBeCloseTo(4, 5);
+    expect(gainPct(100, 100)).toBe(0);
+    expect(gainPct(0, 100)).toBeNull();
+    expect(gainPct(100, 0)).toBeNull();
+  });
 });
 
 describe("selectAlert (priority + suppression)", () => {

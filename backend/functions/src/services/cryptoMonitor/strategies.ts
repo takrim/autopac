@@ -154,6 +154,17 @@ export function evaluateAll(sc: ScoreResult, cfg = STRATEGY_DEFAULTS): StrategyR
   ];
 }
 
+/** DCA stacking: allow another buy only while invested + next order stays ≤ cap. */
+export function shouldStack(costBasisUsd: number, tradeValueUsd: number, maxStackUsd: number): boolean {
+  return costBasisUsd + tradeValueUsd <= maxStackUsd;
+}
+
+/** Percent above entry, or null if inputs are invalid. */
+export function gainPct(avgEntry: number, current: number): number | null {
+  if (!(avgEntry > 0) || !(current > 0)) return null;
+  return ((current - avgEntry) / avgEntry) * 100;
+}
+
 const priorityOf = (a: AlertType) => STRATEGY_PRIORITY.indexOf(a);
 
 /**
