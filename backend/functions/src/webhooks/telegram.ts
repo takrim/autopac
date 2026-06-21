@@ -936,7 +936,7 @@ export async function handleTelegramWebhook(req: Request, res: Response): Promis
         "  Preview the monitor now (whole universe, or one coin). Add 'live'",
         "  (single coin) for the REAL path (auto-buys if STRONG_BUY & AUTO_APPROVE).",
         "  Add 'force' to place a real test buy regardless of score/AUTO_APPROVE",
-        "  (pyramid+risk still apply). Use a tiny tradeValueUsd!",
+        "  (stack cap + risk still apply). Use a tiny tradeValueUsd!",
         "  Example: /scan SOL  ·  /scan SOL live  ·  /scan SOL live force",
         "",
         "*/coin* <symbol> [full]",

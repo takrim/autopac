@@ -5,7 +5,8 @@
  * the separate strategies, persist a `coin_metrics` row + the run snapshot, and
  * notify the highest-priority strategy alert (per-strategy cooldown). On a fresh
  * STRONG_BUY alert it also auto-buys via executeOrder when `MONITOR_AUTO_BUY` is
- * on (pyramid + risk gated, ~$10). Other strategies are notify-only.
+ * on (DCA stack-cap + risk gated, ~$10; the global ORDER_PYRAMID flag does NOT
+ * apply to the monitor). Other strategies are notify-only.
  */
 
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
@@ -345,7 +346,9 @@ async function runTakeProfit(cfg: TradingConfig, notify: boolean): Promise<void>
 }
 
 /**
- * Place a buy mirroring the bulltrend path (pyramid + risk gated). `execute`
+ * Place a buy for the monitor. Gating is the DCA stack cap (MONITOR_STACK_MAX_USD)
+ * + executeOrder's risk checks only — the global ORDER_PYRAMID flag is NOT
+ * consulted here, so stacking works regardless of its value. `execute`
  * decides whether to actually place the order (else store a PENDING signal).
  * Used by the scheduled STRONG_BUY auto-buy (gated by MONITOR_AUTO_BUY) and the
  * `/scan <sym> live force` manual test.
