@@ -380,7 +380,11 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
     status: "PENDING",
     broker: "coinbase",
     signalTime: new Date().toISOString(),
-    stopLoss: entryPrice > 0 ? parseFloat((entryPrice * (1 - cfg.STOP_LOSS_PCT / 100)).toFixed(8)) : undefined,
+    // No stop-loss: the monitor's strategy is DCA-down + take-profit at
+    // MONITOR_TAKE_PROFIT_PCT. A tight global STOP_LOSS_PCT (0.5%) stop would
+    // instantly stop out volatile coins (this is what "liquidated" 2Z) and
+    // contradicts stacking into dips.
+    stopLoss: undefined,
     strongBuy: true,
     idempotencyKey: crypto.createHash("sha256").update(`crypto-monitor:${coin.symbol}:${Date.now()}`).digest("hex").slice(0, 32),
     createdAt: FieldValue.serverTimestamp(),
