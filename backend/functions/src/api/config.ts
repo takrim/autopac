@@ -25,6 +25,7 @@ export interface TradingConfig {
   MONITOR_AUTO_BUY: boolean; // crypto monitor auto-buys on a STRONG_BUY strategy alert
   MONITOR_STACK_MAX_USD: number; // max total invested per coin via DCA stacking
   MONITOR_TAKE_PROFIT_PCT: number; // auto-sell a held coin once it's this % above entry
+  MONITOR_DCA_DIP_PCT: number; // DCA-buy more of a held coin once it's this % below avg entry (0 disables)
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -43,6 +44,7 @@ const DEFAULTS: TradingConfig = {
   MONITOR_AUTO_BUY: true,
   MONITOR_STACK_MAX_USD: 100,
   MONITOR_TAKE_PROFIT_PCT: 4,
+  MONITOR_DCA_DIP_PCT: 10,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
@@ -163,6 +165,7 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "MONITOR_AUTO_BUY",
   "MONITOR_STACK_MAX_USD",
   "MONITOR_TAKE_PROFIT_PCT",
+  "MONITOR_DCA_DIP_PCT",
   "brokerSettings",
 ];
 
@@ -214,6 +217,10 @@ export async function handleUpdateConfig(req: Request, res: Response): Promise<v
   }
   if (update.MAX_DAILY_TRADES !== undefined && (update.MAX_DAILY_TRADES < 1 || update.MAX_DAILY_TRADES > 500)) {
     res.status(400).json({ error: "MAX_DAILY_TRADES must be between 1 and 500" });
+    return;
+  }
+  if (update.MONITOR_DCA_DIP_PCT !== undefined && (update.MONITOR_DCA_DIP_PCT < 0 || update.MONITOR_DCA_DIP_PCT > 50)) {
+    res.status(400).json({ error: "MONITOR_DCA_DIP_PCT must be between 0 and 50 (0 disables)" });
     return;
   }
 
