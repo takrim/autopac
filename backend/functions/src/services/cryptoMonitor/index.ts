@@ -383,8 +383,9 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
     // No stop-loss: the monitor's strategy is DCA-down + take-profit at
     // MONITOR_TAKE_PROFIT_PCT. A tight global STOP_LOSS_PCT (0.5%) stop would
     // instantly stop out volatile coins (this is what "liquidated" 2Z) and
-    // contradicts stacking into dips.
-    stopLoss: undefined,
+    // contradicts stacking into dips. The `stopLoss` field is OMITTED entirely
+    // (not set to `undefined`) — Firestore rejects documents with explicit
+    // `undefined` values, which silently failed every auto-buy's signals.add().
     strongBuy: true,
     idempotencyKey: crypto.createHash("sha256").update(`crypto-monitor:${coin.symbol}:${Date.now()}`).digest("hex").slice(0, 32),
     createdAt: FieldValue.serverTimestamp(),
