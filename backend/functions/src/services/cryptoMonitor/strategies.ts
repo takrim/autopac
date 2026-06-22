@@ -50,7 +50,9 @@ export const STRATEGY_DEFAULTS: StrategyConfig = {
   strong_buy: { min_f: 3, min_t: 9, min_total: 20, max_rsi: 70, require_near_ema: true },
   momentum_breakout: { min_f: 3, min_volume_multiplier: 1.5, min_rsi: 55, max_rsi: 78, max_24h_change: 18 },
   pullback_buy_zone: { min_f: 3, min_rsi: 38, max_rsi: 60 },
-  cooldown_hours: 6,
+  // Per coin+strategy throttle. 0.5h (30 min) lets DCA stacking add $10 every few
+  // 5-min runs (≈2.5h to reach the $100/coin cap) without spamming every run.
+  cooldown_hours: 0.5,
 };
 
 // Helpers — null RSI fails any RSI bound (conservative).
