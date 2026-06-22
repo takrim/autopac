@@ -135,9 +135,10 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
 
   // Take-profit sweep over ALL held Coinbase positions (full scheduled runs only).
   if (!dryRun && !opts?.onlySymbol && tradingConfig.MONITOR_AUTO_BUY) {
-    await runTakeProfit(tradingConfig, notify).catch(err =>
-      logger.error("[CRYPTO_MONITOR] take-profit sweep failed", { error: String(err) })
-    );
+    await runTakeProfit(tradingConfig, notify).catch(async err => {
+      logger.error("[CRYPTO_MONITOR] take-profit sweep failed", { error: String(err) });
+      if (notify) await sendTelegramMessage(`🚨 *Take-profit sweep FAILED*\n${String(err).slice(0, 200)}`).catch(() => {});
+    });
   }
 
   const [marketRows, newsBySymbol] = await Promise.all([
@@ -211,10 +212,13 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
       if (emitted) alerts++;
 
       // Auto-buy on a fresh STRONG_BUY alert (scheduled runs only, gated by MONITOR_AUTO_BUY).
+      // A failure here must NOT be silent — alert loudly so a broken buy path is
+      // visible immediately (this is what hid the stopLoss=undefined regression).
       if (emitted && selected?.name === "STRONG_BUY" && updatesCooldown && tradingConfig.MONITOR_AUTO_BUY) {
-        await autoBuy(coin, result, price, notify, tradingConfig, true, "Auto-buy STRONG_BUY").catch(err =>
-          logger.error("[CRYPTO_MONITOR] auto-buy failed", { symbol: coin.symbol, error: String(err) })
-        );
+        await autoBuy(coin, result, price, notify, tradingConfig, true, "Auto-buy STRONG_BUY").catch(async err => {
+          logger.error("[CRYPTO_MONITOR] auto-buy failed", { symbol: coin.symbol, error: String(err) });
+          await sendTelegramMessage(`🚨 *Auto-buy FAILED* ${coin.symbol} (STRONG_BUY)\n${String(err).slice(0, 200)}`).catch(() => {});
+        });
       }
     } catch (err) {
       logger.warn("[CRYPTO_MONITOR] coin scoring failed", { symbol: coin.symbol, error: String(err) });
