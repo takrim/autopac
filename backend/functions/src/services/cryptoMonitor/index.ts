@@ -13,7 +13,7 @@ import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import crypto from "crypto";
 import { sendTelegramMessage } from "../telegram";
-import { sendCryptoBuyAlertNotification } from "../notification";
+import { sendCryptoBuyAlertNotification, sendCryptoBuyFailedNotification, sendTakeProfitSoldNotification } from "../notification";
 import { getBroker } from "../../brokers";
 import { CoinbaseBroker } from "../../brokers/coinbase";
 import { getTradingConfig, TradingConfig } from "../../api/config";
@@ -217,7 +217,10 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
       if (emitted && selected?.name === "STRONG_BUY" && updatesCooldown && tradingConfig.MONITOR_AUTO_BUY) {
         await autoBuy(coin, result, price, notify, tradingConfig, true, "Auto-buy STRONG_BUY").catch(async err => {
           logger.error("[CRYPTO_MONITOR] auto-buy failed", { symbol: coin.symbol, error: String(err) });
-          await sendTelegramMessage(`🚨 *Auto-buy FAILED* ${coin.symbol} (STRONG_BUY)\n${String(err).slice(0, 200)}`).catch(() => {});
+          if (notify) {
+            await sendTelegramMessage(`🚨 *Auto-buy FAILED* ${coin.symbol} (STRONG_BUY)\n${String(err).slice(0, 200)}`).catch(() => {});
+            await sendCryptoBuyFailedNotification(coin.symbol, String(err)).catch(() => {});
+          }
         });
       }
     } catch (err) {
@@ -307,7 +310,9 @@ async function notifyAlert(
 
   if (notify) {
     await sendTelegramMessage(formatBeginnerBreakdown(coin, result, price)).catch(() => {});
-    if (selected.name !== "RISK_BLOCK") {
+    // Mobile push is reserved for STRONG_BUY only (other alert types stay
+    // Telegram-only). Buy-failure and take-profit-sell pushes fire elsewhere.
+    if (selected.name === "STRONG_BUY") {
       await sendCryptoBuyAlertNotification(coin.symbol, selected.name, result.total, selected.reasons).catch(() => {});
     }
   }
@@ -341,7 +346,10 @@ async function runTakeProfit(cfg: TradingConfig, notify: boolean): Promise<void>
         expression: `(${cur} - ${avg}) / ${avg} = +${pct.toFixed(2)}%`,
         params: { result },
       });
-      if (notify) await sendTelegramMessage(`💰 *Take-profit SOLD* ${symbol} +${pct.toFixed(2)}% (entry ${avg}, now ${cur})`).catch(() => {});
+      if (notify) {
+        await sendTelegramMessage(`💰 *Take-profit SOLD* ${symbol} +${pct.toFixed(2)}% (entry ${avg}, now ${cur})`).catch(() => {});
+        await sendTakeProfitSoldNotification(symbol, pct, avg, cur).catch(() => {});
+      }
     } catch (err) {
       logger.error("[CRYPTO_MONITOR] take-profit sell failed", { symbol, error: String(err) });
       if (notify) await sendTelegramMessage(`❌ *Take-profit sell failed* ${symbol}: ${String(err).slice(0, 150)}`).catch(() => {});

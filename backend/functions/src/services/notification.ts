@@ -237,6 +237,38 @@ export async function sendCryptoBuyAlertNotification(
 }
 
 /**
+ * Push fired when the crypto monitor's STRONG_BUY auto-buy fails.
+ */
+export async function sendCryptoBuyFailedNotification(
+  symbol: string,
+  reason: string
+): Promise<void> {
+  await sendPushToAllTokens(
+    "🚨 Auto-buy FAILED",
+    `${symbol} (STRONG_BUY) — ${reason}`.slice(0, 180),
+    { type: "CRYPTO_BUY_FAILED", symbol },
+    "CRYPTO_BUY_FAILED"
+  );
+}
+
+/**
+ * Push fired when the crypto monitor sells a position at take-profit.
+ */
+export async function sendTakeProfitSoldNotification(
+  symbol: string,
+  pct: number,
+  entry: number,
+  current: number
+): Promise<void> {
+  await sendPushToAllTokens(
+    "💰 Take-profit SOLD",
+    `${symbol} +${pct.toFixed(2)}% (entry ${entry}, now ${current})`,
+    { type: "TAKE_PROFIT_SOLD", symbol, pct: pct.toFixed(2) },
+    "TAKE_PROFIT_SOLD"
+  );
+}
+
+/**
  * Push fired by burstScanner when an auto-buy succeeds on Coinbase.
  * Example body: "Burst BUY: BTC-USD @ $43,210.55"
  */
