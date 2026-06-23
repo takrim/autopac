@@ -959,6 +959,84 @@ export class CoinbaseBroker implements IBroker {
   }
 
   /**
+   * Per-tranche buy breakdown for a single held product — the individual BUY
+   * fills that make up the current holding (DCA history), plus a position
+   * summary. Returns null if nothing is held. Walks BUY fills newest-first only
+   * up to the current quantity, so prior closed-out cycles are excluded.
+   */
+  async getPositionBuys(productId: string): Promise<{
+    symbol: string;
+    qty: number;
+    avgEntryPrice: number;
+    currentPrice: number;
+    costBasisUsd: number;
+    marketValueUsd: number;
+    unrealizedPlUsd: number;
+    unrealizedPlPct: number;
+    buys: Array<{ time: string; price: number; sizeBase: number; usdValue: number }>;
+  } | null> {
+    const base = productId.split("-")[0].toUpperCase();
+
+    // Current holding quantity.
+    const { ok: acctOk, data: acctData } = await this.request("GET", "/accounts?limit=250");
+    if (!acctOk) return null;
+    const accounts = (acctData.accounts as Array<Record<string, unknown>>) || [];
+    const acct = accounts.find((a) => (a.currency as string)?.toUpperCase() === base);
+    if (!acct) return null;
+    const available = parseFloat((acct.available_balance as Record<string, string>)?.value || "0");
+    const held = parseFloat((acct.hold as Record<string, string>)?.value || "0");
+    const totalQty = available + held;
+    if (totalQty <= 0) return null;
+
+    // Current price.
+    let currentPrice = 0;
+    try {
+      const { ok, data } = await this.request("GET", `/products/${productId}`);
+      if (ok) currentPrice = parseFloat((data.price as string) || "0");
+    } catch { /* non-fatal */ }
+
+    // Walk BUY fills (newest-first) until we've covered the current quantity.
+    const buys: Array<{ time: string; price: number; sizeBase: number; usdValue: number }> = [];
+    let totalFees = 0, totalBuyQty = 0, totalBuyCost = 0, remainingQty = totalQty;
+    try {
+      const { ok, data } = await this.request("GET", `/orders/historical/fills?product_id=${productId}&limit=100`);
+      if (ok) {
+        const fills = (data.fills as Array<Record<string, unknown>>) || [];
+        for (const fill of fills) {
+          if (fill.side !== "BUY" || remainingQty <= 0) continue;
+          const price = parseFloat((fill.price as string) || "0");
+          let fillQty = parseFloat((fill.size as string) || "0");
+          const commission = parseFloat((fill.commission as string) || "0");
+          if ((fill.size_in_quote as boolean | undefined) && price > 0) fillQty = fillQty / price;
+          const usedQty = Math.min(fillQty, remainingQty);
+          if (usedQty <= 0) continue;
+          totalBuyQty += usedQty;
+          totalBuyCost += usedQty * price;
+          totalFees += commission * (fillQty > 0 ? usedQty / fillQty : 0);
+          remainingQty -= usedQty;
+          buys.push({
+            time: (fill.trade_time as string) || "",
+            price,
+            sizeBase: usedQty,
+            usdValue: usedQty * price,
+          });
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    const avgEntryPrice = totalBuyQty > 0 ? totalBuyCost / totalBuyQty : 0;
+    const costBasisUsd = totalQty * avgEntryPrice;
+    const marketValueUsd = totalQty * currentPrice;
+    const estSellFee = marketValueUsd * CONFIG.SIMULATED_FEE_RATE;
+    const unrealizedPlUsd = marketValueUsd - costBasisUsd - totalFees - estSellFee;
+    const unrealizedPlPct = costBasisUsd > 0 ? (unrealizedPlUsd / costBasisUsd) * 100 : 0;
+
+    // Oldest-first for display.
+    buys.reverse();
+    return { symbol: productId, qty: totalQty, avgEntryPrice, currentPrice, costBasisUsd, marketValueUsd, unrealizedPlUsd, unrealizedPlPct, buys };
+  }
+
+  /**
    * Get USD cash balance from Coinbase accounts.
    */
   async getCashBalance(): Promise<number> {

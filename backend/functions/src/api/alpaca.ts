@@ -673,3 +673,27 @@ export async function handleGetNews(req: Request, res: Response): Promise<void> 
     res.json({ news: [] });
   }
 }
+
+/**
+ * GET /positions/:symbol/fills — per-tranche DCA buy breakdown for a held
+ * Coinbase position (the individual buys that built the current holding) plus a
+ * position summary. Crypto/Coinbase only.
+ */
+export async function handleGetPositionFills(req: Request, res: Response): Promise<void> {
+  const user = (req as any).user;
+  if (!user?.uid) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+  const { symbol } = req.params;
+  if (!symbol) { res.status(400).json({ error: "Missing symbol" }); return; }
+
+  const productId = /-USD$/i.test(symbol) ? symbol.toUpperCase() : `${symbol.toUpperCase()}-USD`;
+  try {
+    const broker = getBroker("coinbase") as import("../brokers/coinbase").CoinbaseBroker;
+    const result = await broker.getPositionBuys(productId);
+    const tradingConfig = await getTradingConfig();
+    res.json({ position: result, stackMaxUsd: tradingConfig.MONITOR_STACK_MAX_USD });
+  } catch (err) {
+    logger.error("[API] Position fills error", { symbol, error: String(err) });
+    res.status(500).json({ error: "Failed to fetch position fills" });
+  }
+}

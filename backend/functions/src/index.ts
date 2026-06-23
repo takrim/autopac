@@ -32,6 +32,7 @@ import {
   handleUpdateStopLoss,
   handleGetLevels,
   handleGetNews,
+  handleGetPositionFills,
 } from "./api/alpaca";
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
@@ -75,6 +76,7 @@ apiApp.delete("/positions/:symbol", handleLiquidatePosition);
 apiApp.post("/positions/:symbol/stop-loss", handleUpdateStopLoss);
 apiApp.get("/positions/:symbol/levels", handleGetLevels);
 apiApp.get("/positions/:symbol/news", handleGetNews);
+apiApp.get("/positions/:symbol/fills", handleGetPositionFills);
 apiApp.get("/portfolio-history", handleGetPortfolioHistory);
 apiApp.get("/config", handleGetConfig);
 apiApp.patch("/config", handleUpdateConfig);

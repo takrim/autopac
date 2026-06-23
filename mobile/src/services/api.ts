@@ -204,6 +204,36 @@ export async function fetchPositions(): Promise<Position[]> {
   return data.positions;
 }
 
+// --- Position DCA buy breakdown ---
+
+export interface PositionBuy {
+  time: string;
+  price: number;
+  sizeBase: number;
+  usdValue: number;
+}
+
+export interface PositionFills {
+  symbol: string;
+  qty: number;
+  avgEntryPrice: number;
+  currentPrice: number;
+  costBasisUsd: number;
+  marketValueUsd: number;
+  unrealizedPlUsd: number;
+  unrealizedPlPct: number;
+  buys: PositionBuy[];
+}
+
+export interface PositionFillsResponse {
+  position: PositionFills | null;
+  stackMaxUsd: number;
+}
+
+export async function fetchPositionFills(symbol: string): Promise<PositionFillsResponse> {
+  return apiRequest<PositionFillsResponse>(`/positions/${encodeURIComponent(symbol)}/fills`);
+}
+
 export async function fetchPositionsWithMeta(): Promise<PositionsResponse> {
   return apiRequest<PositionsResponse>("/positions");
 }

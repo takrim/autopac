@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -12,7 +12,7 @@ import {
   SafeAreaView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { fetchLastRun, MonitorRun, MonitorCoin, MonitorAlertType } from "../services/api";
+import { fetchLastRun, fetchPositionFills, MonitorRun, MonitorCoin, MonitorAlertType, PositionFills } from "../services/api";
 
 const ALERT_META: Record<MonitorAlertType, { label: string; emoji: string; color: string; hint: string }> = {
   STRONG_BUY: { label: "Strong Buy", emoji: "🚀", color: "#5cb85c", hint: "highest-confidence setup — auto-buys" },
@@ -42,6 +42,13 @@ type Filter = "all" | "buys" | "watch";
 
 const metaFor = (t?: MonitorAlertType) => ALERT_META[t ?? "NONE"] ?? ALERT_META.NONE;
 const fmtPrice = (p: number) => (p >= 1 ? `$${p.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : `$${p.toPrecision(3)}`);
+const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtSignedUsd = (n: number) => `${n >= 0 ? "+" : "-"}${fmtUsd(Math.abs(n))}`;
+const fmtPnl = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+const fmtDateTime = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
 
 // Color the score by how strong the overall setup is, for at-a-glance scanning.
 function scoreColor(total: number): string {
@@ -91,6 +98,22 @@ export default function LastRunScreen() {
   const [selected, setSelected] = useState<MonitorCoin | null>(null);
   const [showFull, setShowFull] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  // DCA buy breakdown for the tapped coin.
+  const [fills, setFills] = useState<PositionFills | null>(null);
+  const [stackMax, setStackMax] = useState(100);
+  const [fillsLoading, setFillsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selected) { setFills(null); return; }
+    let cancelled = false;
+    setFills(null);
+    setFillsLoading(true);
+    fetchPositionFills(selected.productId)
+      .then((r) => { if (!cancelled) { setFills(r.position); setStackMax(r.stackMaxUsd || 100); } })
+      .catch(() => { if (!cancelled) setFills(null); })
+      .finally(() => { if (!cancelled) setFillsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected]);
 
   const load = useCallback(async () => {
     try {
@@ -240,6 +263,56 @@ export default function LastRunScreen() {
                 </TouchableOpacity>
               </View>
               <ScrollView style={styles.modalBody} contentContainerStyle={{ padding: 16 }}>
+                {/* DCA buy breakdown */}
+                <View style={styles.dcaCard}>
+                  <View style={styles.dcaHeader}>
+                    <Text style={styles.dcaTitle}>🧱 Your DCA buys</Text>
+                    {fills && <Text style={styles.dcaCount}>{fills.buys.length} buy{fills.buys.length !== 1 ? "s" : ""}</Text>}
+                  </View>
+
+                  {fillsLoading && <ActivityIndicator color="#5bc0de" style={{ paddingVertical: 16 }} />}
+
+                  {!fillsLoading && !fills && (
+                    <Text style={styles.dcaEmpty}>Not currently held — no buys yet. A STRONG_BUY or a {">"}10% dip will start a position.</Text>
+                  )}
+
+                  {!fillsLoading && fills && (
+                    <>
+                      <View style={styles.dcaSummary}>
+                        <View style={styles.dcaSumItem}><Text style={styles.dcaSumVal}>{fmtUsd(fills.costBasisUsd)}</Text><Text style={styles.dcaSumLabel}>Invested</Text></View>
+                        <View style={styles.dcaSumItem}><Text style={styles.dcaSumVal}>{fmtPrice(fills.avgEntryPrice)}</Text><Text style={styles.dcaSumLabel}>Avg entry</Text></View>
+                        <View style={styles.dcaSumItem}>
+                          <Text style={[styles.dcaSumVal, { color: fills.unrealizedPlUsd >= 0 ? "#5cb85c" : "#d9534f" }]}>
+                            {fmtPnl(fills.unrealizedPlPct)}
+                          </Text>
+                          <Text style={styles.dcaSumLabel}>{fmtSignedUsd(fills.unrealizedPlUsd)}</Text>
+                        </View>
+                      </View>
+
+                      {/* progress toward the per-coin stack cap */}
+                      <View style={styles.capRow}>
+                        <View style={styles.capTrack}>
+                          <View style={[styles.capFill, { width: `${Math.min(100, (fills.costBasisUsd / stackMax) * 100)}%` }]} />
+                        </View>
+                        <Text style={styles.capText}>{fmtUsd(fills.costBasisUsd)} / {fmtUsd(stackMax)} cap</Text>
+                      </View>
+
+                      {fills.buys.map((b, i) => (
+                        <View key={i} style={styles.buyRow}>
+                          <View style={styles.buyIndex}><Text style={styles.buyIndexText}>{i + 1}</Text></View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.buyAmount}>{fmtUsd(b.usdValue)}</Text>
+                            <Text style={styles.buyMeta}>{fmtDateTime(b.time)} · @ {fmtPrice(b.price)}</Text>
+                          </View>
+                          <Text style={[styles.buyPnl, { color: fills.currentPrice >= b.price ? "#5cb85c" : "#d9534f" }]}>
+                            {fmtPnl(((fills.currentPrice - b.price) / b.price) * 100)}
+                          </Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+                </View>
+
                 <Text style={styles.analysisText}>{showFull ? selected.full : selected.friendly}</Text>
               </ScrollView>
             </>
@@ -314,4 +387,24 @@ const styles = StyleSheet.create({
   toggleTextActive: { color: "#e94560" },
   modalBody: { flex: 1 },
   analysisText: { color: "#ddd", fontSize: 14, lineHeight: 21 },
+  // DCA card
+  dcaCard: { backgroundColor: "#16213e", borderRadius: 12, padding: 14, marginBottom: 18, borderWidth: 1, borderColor: "#0f3460" },
+  dcaHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
+  dcaTitle: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  dcaCount: { color: "#5bc0de", fontSize: 12, fontWeight: "700" },
+  dcaEmpty: { color: "#888", fontSize: 13, lineHeight: 19 },
+  dcaSummary: { flexDirection: "row", marginBottom: 12 },
+  dcaSumItem: { flex: 1, alignItems: "center" },
+  dcaSumVal: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  dcaSumLabel: { color: "#888", fontSize: 11, marginTop: 2 },
+  capRow: { marginBottom: 14 },
+  capTrack: { height: 6, borderRadius: 3, backgroundColor: "#0f3460", overflow: "hidden" },
+  capFill: { height: 6, borderRadius: 3, backgroundColor: "#5cb85c" },
+  capText: { color: "#888", fontSize: 11, marginTop: 4, textAlign: "right" },
+  buyRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8, borderTopWidth: 1, borderTopColor: "#0f3460" },
+  buyIndex: { width: 22, height: 22, borderRadius: 11, backgroundColor: "#0f3460", alignItems: "center", justifyContent: "center" },
+  buyIndexText: { color: "#bbb", fontSize: 11, fontWeight: "700" },
+  buyAmount: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  buyMeta: { color: "#888", fontSize: 11, marginTop: 2 },
+  buyPnl: { fontSize: 13, fontWeight: "700" },
 });
