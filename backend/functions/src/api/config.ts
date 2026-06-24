@@ -51,11 +51,11 @@ const DEFAULTS: TradingConfig = {
   MONITOR_TAKE_PROFIT_PCT: 4,
   MONITOR_DCA_DIP_PCT: 10,
   STOCK_MONITOR_AUTO_BUY: true,
-  STOCK_MONITOR_STACK_MAX_USD: 3000,
+  STOCK_MONITOR_STACK_MAX_USD: 100, // same as crypto: $10 tranches up to $100/stock
   STOCK_MONITOR_TAKE_PROFIT_PCT: 4,
   STOCK_MONITOR_DCA_DIP_PCT: 10,
   brokerSettings: {
-    alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
+    alpaca: { tradeValueUsd: 10, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
   },
 };
