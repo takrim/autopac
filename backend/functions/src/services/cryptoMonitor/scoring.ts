@@ -111,17 +111,26 @@ const MAJOR_BEARISH_WORDS = [
   "hack", "hacked", "exploit", "breach", "stolen", "drained", "bridge exploit", "sec ", "lawsuit", "sued",
   "subpoena", "criminal investigation", "delist", "delisting", "chain halt", "halt", "halted", "outage",
   "insolvency", "insolvent", "bankrupt", "bankruptcy", "founder arrest", "arrested", "seized", "token unlock",
-  "rug", "scam", "fraud",
+  "rug pull", "rugpull", "scam", "fraud",
+  // Stock catalysts
+  "earnings miss", "misses estimates", "cuts guidance", "guidance cut", "profit warning", "recall", "recalls",
+  "data breach", "going concern", "default", "delisted", "antitrust", "probe",
 ];
 const BULLISH_NEWS_WORDS = [
   "etf", "approval", "approved", "partnership", "partners with", "integration", "integrates", "listing",
   "listed", "lists", "upgrade", "mainnet", "institutional", "adoption", "ecosystem fund", "grant", "backed",
   "invests", "investment", "buyback", "all-time high", "record high", "revenue growth", "tvl growth",
+  // Stock catalysts
+  "earnings beat", "beats estimates", "tops estimates", "raises guidance", "raises forecast", "guidance raise",
+  "record revenue", "dividend increase", "acquisition", "acquires", "merger", "price target raised",
+  "fda approval", "contract win", "stock split", "outperform",
 ];
 const SOFT_BEARISH_WORDS = [
   "falls", "fall", "selloff", "sell-off", "liquidation", "liquidations", "warns", "warning", "crash",
   "volatility", "bearish", "decline", "declines", "plunge", "plummet", "dump", "slump", "tumble", "drop",
   "fear", "downturn", "correction",
+  // Stock catalysts (soft)
+  "downgrade", "downgraded", "misses", "cuts forecast", "weak guidance", "disappointing", "slowing", "layoffs",
 ];
 
 /** Classify a headline into one of four news categories (major-bearish wins). */

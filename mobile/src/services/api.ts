@@ -469,3 +469,9 @@ export async function fetchLastRun(): Promise<MonitorRun | null> {
   const data = await apiRequest<{ run: MonitorRun | null }>("/monitor/last-run");
   return data.run;
 }
+
+/** Stock monitor's most recent run (same shape as the crypto run). */
+export async function fetchStockLastRun(): Promise<MonitorRun | null> {
+  const data = await apiRequest<{ run: MonitorRun | null }>("/stock-monitor/last-run");
+  return data.run;
+}

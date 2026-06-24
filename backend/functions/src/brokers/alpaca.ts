@@ -642,6 +642,77 @@ export class AlpacaBroker implements IBroker {
   }
 
   /**
+   * Per-tranche DCA buy breakdown for a single held equity — the individual BUY
+   * fills that make up the current holding plus a position summary. Returns null
+   * if nothing is held. Walks BUY fills newest-first only up to the current
+   * quantity, so prior closed-out cycles are excluded.
+   */
+  async getPositionBuys(symbol: string): Promise<{
+    symbol: string;
+    qty: number;
+    avgEntryPrice: number;
+    currentPrice: number;
+    costBasisUsd: number;
+    marketValueUsd: number;
+    unrealizedPlUsd: number;
+    unrealizedPlPct: number;
+    buys: Array<{ time: string; price: number; sizeBase: number; usdValue: number }>;
+  } | null> {
+    const config = this.getConfig();
+    const headers = this.getHeaders();
+    const sym = symbol.toUpperCase();
+
+    // Current position summary.
+    let pos: Record<string, string>;
+    try {
+      const resp = await fetch(`${config.baseUrl}/v2/positions/${encodeURIComponent(sym)}`, { headers });
+      if (!resp.ok) return null; // 404 = no position
+      pos = (await resp.json()) as Record<string, string>;
+    } catch {
+      return null;
+    }
+    const totalQty = parseFloat(pos.qty || "0");
+    if (totalQty <= 0) return null;
+
+    // Walk FILL activities (newest-first) accumulating BUY fills up to totalQty.
+    const buys: Array<{ time: string; price: number; sizeBase: number; usdValue: number }> = [];
+    let remainingQty = totalQty;
+    try {
+      const resp = await fetch(
+        `${config.baseUrl}/v2/account/activities/FILL?symbols=${encodeURIComponent(sym)}&direction=desc&page_size=100`,
+        { headers },
+      );
+      if (resp.ok) {
+        const acts = (await resp.json()) as Array<Record<string, string>>;
+        for (const a of acts) {
+          if ((a.side || "").toLowerCase() !== "buy" || remainingQty <= 0) continue;
+          const price = parseFloat(a.price || "0");
+          const qty = parseFloat(a.qty || "0");
+          if (qty <= 0) continue;
+          const usedQty = Math.min(qty, remainingQty);
+          remainingQty -= usedQty;
+          buys.push({ time: a.transaction_time || "", price, sizeBase: usedQty, usdValue: usedQty * price });
+        }
+      }
+    } catch {
+      // non-fatal — summary still returns
+    }
+    buys.reverse(); // oldest-first for display
+
+    return {
+      symbol: sym,
+      qty: totalQty,
+      avgEntryPrice: parseFloat(pos.avg_entry_price || "0"),
+      currentPrice: parseFloat(pos.current_price || "0"),
+      costBasisUsd: parseFloat(pos.cost_basis || "0"),
+      marketValueUsd: parseFloat(pos.market_value || "0"),
+      unrealizedPlUsd: parseFloat(pos.unrealized_pl || "0"),
+      unrealizedPlPct: parseFloat(pos.unrealized_plpc || "0") * 100,
+      buys,
+    };
+  }
+
+  /**
    * Fetch OHLCV bars for a symbol, oldest-first.
    * Routes to the crypto or equities data API based on the symbol form.
    */

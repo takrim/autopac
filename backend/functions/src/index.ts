@@ -37,9 +37,11 @@ import {
 import { handleGetConfig, handleUpdateConfig } from "./api/config";
 import { handleGetTrending } from "./api/trending";
 import { handleListCryptoAlerts, handleGetLastRun } from "./api/crypto";
+import { handleGetStockLastRun, handleListStockAlerts } from "./api/stocks";
 import { handleTelegramWebhook } from "./webhooks/telegram";
 import { sendTelegramMessage } from "./services/telegram";
 import { runCryptoMonitor } from "./services/cryptoMonitor";
+import { runStockMonitor } from "./services/stockMonitor";
 
 // --- Webhook App (no auth — uses shared secret) ---
 const webhookApp = express();
@@ -83,6 +85,8 @@ apiApp.patch("/config", handleUpdateConfig);
 apiApp.get("/trending", handleGetTrending);
 apiApp.get("/crypto-alerts", handleListCryptoAlerts);
 apiApp.get("/monitor/last-run", handleGetLastRun);
+apiApp.get("/stock-alerts", handleListStockAlerts);
+apiApp.get("/stock-monitor/last-run", handleGetStockLastRun);
 
 // --- Export Cloud Functions ---
 // invoker: "public" allows HTTP access without Google IAM auth.
@@ -151,6 +155,28 @@ export const cryptoMonitor = onSchedule(
       const msg = String(err);
       logger.error("[CRYPTO_MONITOR] Scheduled run failed", { error: msg });
       await sendTelegramMessage(`⚠️ Crypto Monitor FAILED:\n${msg}`).catch(() => {});
+    }
+  }
+);
+
+// Stock buy-signal monitor — every 5 minutes (skips when the US market is closed).
+// Same engine as cryptoMonitor but via Alpaca; auto-buys on STRONG_BUY when
+// STOCK_MONITOR_AUTO_BUY, with DCA stacking + take-profit + dip-buys.
+export const stockMonitor = onSchedule(
+  {
+    region: "us-central1",
+    schedule: "every 5 minutes",
+    timeoutSeconds: 300,
+    maxInstances: 1,
+    secrets: ["ALPACA_API_KEY", "ALPACA_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+  },
+  async () => {
+    try {
+      await runStockMonitor();
+    } catch (err) {
+      const msg = String(err);
+      logger.error("[STOCK_MONITOR] Scheduled run failed", { error: msg });
+      await sendTelegramMessage(`⚠️ Stock Monitor FAILED:\n${msg}`).catch(() => {});
     }
   }
 );

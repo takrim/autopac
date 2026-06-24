@@ -686,12 +686,20 @@ export async function handleGetPositionFills(req: Request, res: Response): Promi
   const { symbol } = req.params;
   if (!symbol) { res.status(400).json({ error: "Missing symbol" }); return; }
 
-  const productId = /-USD$/i.test(symbol) ? symbol.toUpperCase() : `${symbol.toUpperCase()}-USD`;
+  // Crypto symbols carry a -USD product suffix; bare tickers are equities → Alpaca.
+  const isCrypto = /-USD$/i.test(symbol) || /USD[CT]?$/i.test(symbol);
   try {
-    const broker = getBroker("coinbase") as import("../brokers/coinbase").CoinbaseBroker;
-    const result = await broker.getPositionBuys(productId);
     const tradingConfig = await getTradingConfig();
-    res.json({ position: result, stackMaxUsd: tradingConfig.MONITOR_STACK_MAX_USD });
+    if (isCrypto) {
+      const productId = /-USD$/i.test(symbol) ? symbol.toUpperCase() : `${symbol.toUpperCase()}-USD`;
+      const broker = getBroker("coinbase") as import("../brokers/coinbase").CoinbaseBroker;
+      const result = await broker.getPositionBuys(productId);
+      res.json({ position: result, stackMaxUsd: tradingConfig.MONITOR_STACK_MAX_USD });
+    } else {
+      const broker = getBroker("alpaca") as import("../brokers/alpaca").AlpacaBroker;
+      const result = await broker.getPositionBuys(symbol.toUpperCase());
+      res.json({ position: result, stackMaxUsd: tradingConfig.STOCK_MONITOR_STACK_MAX_USD });
+    }
   } catch (err) {
     logger.error("[API] Position fills error", { symbol, error: String(err) });
     res.status(500).json({ error: "Failed to fetch position fills" });

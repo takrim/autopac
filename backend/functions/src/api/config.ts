@@ -26,6 +26,11 @@ export interface TradingConfig {
   MONITOR_STACK_MAX_USD: number; // max total invested per coin via DCA stacking
   MONITOR_TAKE_PROFIT_PCT: number; // auto-sell a held coin once it's this % above entry
   MONITOR_DCA_DIP_PCT: number; // DCA-buy more of a held coin once it's this % below avg entry (0 disables)
+  // --- Stock monitor (Alpaca) — independent of the crypto monitor above ---
+  STOCK_MONITOR_AUTO_BUY: boolean; // stock monitor auto-buys on a STRONG_BUY strategy alert
+  STOCK_MONITOR_STACK_MAX_USD: number; // max total invested per stock via DCA stacking
+  STOCK_MONITOR_TAKE_PROFIT_PCT: number; // auto-sell a held stock once it's this % above entry
+  STOCK_MONITOR_DCA_DIP_PCT: number; // DCA-buy more of a held stock once it's this % below avg entry (0 disables)
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -45,6 +50,10 @@ const DEFAULTS: TradingConfig = {
   MONITOR_STACK_MAX_USD: 100,
   MONITOR_TAKE_PROFIT_PCT: 4,
   MONITOR_DCA_DIP_PCT: 10,
+  STOCK_MONITOR_AUTO_BUY: true,
+  STOCK_MONITOR_STACK_MAX_USD: 3000,
+  STOCK_MONITOR_TAKE_PROFIT_PCT: 4,
+  STOCK_MONITOR_DCA_DIP_PCT: 10,
   brokerSettings: {
     alpaca: { tradeValueUsd: 1000, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
@@ -166,6 +175,10 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "MONITOR_STACK_MAX_USD",
   "MONITOR_TAKE_PROFIT_PCT",
   "MONITOR_DCA_DIP_PCT",
+  "STOCK_MONITOR_AUTO_BUY",
+  "STOCK_MONITOR_STACK_MAX_USD",
+  "STOCK_MONITOR_TAKE_PROFIT_PCT",
+  "STOCK_MONITOR_DCA_DIP_PCT",
   "brokerSettings",
 ];
 
@@ -221,6 +234,14 @@ export async function handleUpdateConfig(req: Request, res: Response): Promise<v
   }
   if (update.MONITOR_DCA_DIP_PCT !== undefined && (update.MONITOR_DCA_DIP_PCT < 0 || update.MONITOR_DCA_DIP_PCT > 50)) {
     res.status(400).json({ error: "MONITOR_DCA_DIP_PCT must be between 0 and 50 (0 disables)" });
+    return;
+  }
+  if (update.STOCK_MONITOR_TAKE_PROFIT_PCT !== undefined && (update.STOCK_MONITOR_TAKE_PROFIT_PCT < 0.1 || update.STOCK_MONITOR_TAKE_PROFIT_PCT > 100)) {
+    res.status(400).json({ error: "STOCK_MONITOR_TAKE_PROFIT_PCT must be between 0.1 and 100" });
+    return;
+  }
+  if (update.STOCK_MONITOR_DCA_DIP_PCT !== undefined && (update.STOCK_MONITOR_DCA_DIP_PCT < 0 || update.STOCK_MONITOR_DCA_DIP_PCT > 50)) {
+    res.status(400).json({ error: "STOCK_MONITOR_DCA_DIP_PCT must be between 0 and 50 (0 disables)" });
     return;
   }
 

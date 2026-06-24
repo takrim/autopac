@@ -42,8 +42,9 @@ export function formatBreakdown(coin: WatchCoin, r: ScoreResult, price: number):
   const { selected, triggered } = selectAlert(evaluateAll(r));
   const sel = selected ? ALERT_META[selected.name] : ALERT_META.NONE;
 
+  const idSuffix = coin.coinbaseProductId && coin.coinbaseProductId !== coin.symbol ? ` (${coin.coinbaseProductId})` : "";
   return [
-    `🔬 *${coin.symbol}* (${coin.coinbaseProductId}) — ${sel.emoji} *${sel.title}*`,
+    `🔬 *${coin.symbol}*${idSuffix} — ${sel.emoji} *${sel.title}*`,
     `Price: ${priceStr}   F:${r.fundamental}  N:${r.news}  T:${r.technical}  Total:*${r.total}*`,
     "",
     block("Fundamental", r.checks.fundamental, r.fundamental, 15),

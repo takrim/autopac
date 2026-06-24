@@ -12,7 +12,9 @@ import {
   SafeAreaView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { fetchLastRun, fetchPositionFills, MonitorRun, MonitorCoin, MonitorAlertType, PositionFills } from "../services/api";
+import { fetchLastRun, fetchStockLastRun, fetchPositionFills, MonitorRun, MonitorCoin, MonitorAlertType, PositionFills } from "../services/api";
+
+type Asset = "crypto" | "stocks";
 
 const ALERT_META: Record<MonitorAlertType, { label: string; emoji: string; color: string; hint: string }> = {
   STRONG_BUY: { label: "Strong Buy", emoji: "🚀", color: "#5cb85c", hint: "highest-confidence setup — auto-buys" },
@@ -98,6 +100,7 @@ export default function LastRunScreen() {
   const [selected, setSelected] = useState<MonitorCoin | null>(null);
   const [showFull, setShowFull] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  const [asset, setAsset] = useState<Asset>("crypto");
   // DCA buy breakdown for the tapped coin.
   const [fills, setFills] = useState<PositionFills | null>(null);
   const [stackMax, setStackMax] = useState(100);
@@ -118,14 +121,14 @@ export default function LastRunScreen() {
   const load = useCallback(async () => {
     try {
       setError(null);
-      setRun(await fetchLastRun());
+      setRun(await (asset === "stocks" ? fetchStockLastRun() : fetchLastRun()));
     } catch (err: any) {
       setError(err.message || "Failed to load");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [asset]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 
@@ -167,9 +170,25 @@ export default function LastRunScreen() {
     </TouchableOpacity>
   );
 
+  const noun = asset === "stocks" ? "stocks" : "coins";
+
+  const AssetTab = ({ value, label }: { value: Asset; label: string }) => (
+    <TouchableOpacity
+      style={[styles.segBtn, asset === value && styles.segBtnActive]}
+      activeOpacity={0.8}
+      onPress={() => { if (asset !== value) { setSelected(null); setFilter("all"); setLoading(true); setAsset(value); } }}
+    >
+      <Text style={[styles.segText, asset === value && styles.segTextActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
+        <View style={styles.segRow}>
+          <AssetTab value="crypto" label="🪙 Crypto" />
+          <AssetTab value="stocks" label="📈 Stocks" />
+        </View>
         <View style={styles.headerTop}>
           <Text style={styles.headerTitle}>
             {strongBuys > 0 ? `🚀 ${strongBuys} Strong Buy${strongBuys !== 1 ? "s" : ""}` : run ? `${actionable} buy signal${actionable !== 1 ? "s" : ""}` : "No runs yet"}
@@ -180,7 +199,7 @@ export default function LastRunScreen() {
           </View>
         </View>
         <Text style={styles.headerSub}>
-          {run ? `Scored ${coins.length} coins` : "Runs every 5 min"}{stale ? " · may be delayed" : ""} · tap a coin for analysis
+          {run ? `Scored ${coins.length} ${noun}` : `Runs every 5 min${asset === "stocks" ? " · market hours" : ""}`}{stale ? " · may be delayed" : ""} · tap for analysis
         </Text>
         <View style={styles.chipRow}>
           <FilterChip value="all" label="All" count={coins.length} />
@@ -198,7 +217,11 @@ export default function LastRunScreen() {
         ListEmptyComponent={
           <View style={styles.center}>
             <Text style={styles.emptyText}>
-              {coins.length === 0 ? "No coins scored yet. The monitor runs every 5 minutes." : "Nothing in this view — try a different filter."}
+              {coins.length === 0
+                ? (asset === "stocks"
+                  ? "No stocks scored yet. The monitor runs every 5 minutes during US market hours."
+                  : "No coins scored yet. The monitor runs every 5 minutes.")
+                : "Nothing in this view — try a different filter."}
             </Text>
           </View>
         }
@@ -329,6 +352,11 @@ const styles = StyleSheet.create({
   errorText: { color: "#d9534f", fontSize: 16 },
   emptyText: { color: "#888", fontSize: 14, textAlign: "center" },
   header: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: "#0f3460" },
+  segRow: { flexDirection: "row", backgroundColor: "#0f3460", borderRadius: 10, padding: 3, marginBottom: 12 },
+  segBtn: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: "center" },
+  segBtnActive: { backgroundColor: "#e94560" },
+  segText: { color: "#9aa", fontSize: 14, fontWeight: "700" },
+  segTextActive: { color: "#fff" },
   headerTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   headerTitle: { color: "#fff", fontSize: 18, fontWeight: "700" },
   headerSub: { color: "#888", fontSize: 12, marginTop: 2 },
