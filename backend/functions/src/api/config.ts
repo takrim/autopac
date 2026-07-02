@@ -31,6 +31,7 @@ export interface TradingConfig {
   STOCK_MONITOR_STACK_MAX_USD: number; // max total invested per stock via DCA stacking
   STOCK_MONITOR_TAKE_PROFIT_PCT: number; // auto-sell a held stock once it's this % above entry
   STOCK_MONITOR_DCA_DIP_PCT: number; // DCA-buy more of a held stock once it's this % below avg entry (0 disables)
+  STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD: number; // off-hours: only buy 1 whole share when its price is under this
   brokerSettings: Record<string, BrokerSettings>;
 }
 
@@ -51,9 +52,10 @@ const DEFAULTS: TradingConfig = {
   MONITOR_TAKE_PROFIT_PCT: 4,
   MONITOR_DCA_DIP_PCT: 10,
   STOCK_MONITOR_AUTO_BUY: true,
-  STOCK_MONITOR_STACK_MAX_USD: 100, // same as crypto: $10 tranches up to $100/stock
+  STOCK_MONITOR_STACK_MAX_USD: 600, // regular hours: $10 fractional; off-hours: whole shares (<$200 each) up to this
   STOCK_MONITOR_TAKE_PROFIT_PCT: 4,
   STOCK_MONITOR_DCA_DIP_PCT: 10,
+  STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD: 200,
   brokerSettings: {
     alpaca: { tradeValueUsd: 10, allowedSymbols: [] },
     coinbase: { tradeValueUsd: 10, allowedSymbols: [] },
@@ -179,6 +181,7 @@ const ALLOWED_KEYS: (keyof TradingConfig)[] = [
   "STOCK_MONITOR_STACK_MAX_USD",
   "STOCK_MONITOR_TAKE_PROFIT_PCT",
   "STOCK_MONITOR_DCA_DIP_PCT",
+  "STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD",
   "brokerSettings",
 ];
 
@@ -242,6 +245,10 @@ export async function handleUpdateConfig(req: Request, res: Response): Promise<v
   }
   if (update.STOCK_MONITOR_DCA_DIP_PCT !== undefined && (update.STOCK_MONITOR_DCA_DIP_PCT < 0 || update.STOCK_MONITOR_DCA_DIP_PCT > 50)) {
     res.status(400).json({ error: "STOCK_MONITOR_DCA_DIP_PCT must be between 0 and 50 (0 disables)" });
+    return;
+  }
+  if (update.STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD !== undefined && (update.STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD < 1 || update.STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD > 100000)) {
+    res.status(400).json({ error: "STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD must be between 1 and 100000" });
     return;
   }
 

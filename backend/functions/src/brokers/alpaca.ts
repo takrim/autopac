@@ -166,20 +166,21 @@ export class AlpacaBroker implements IBroker {
         ? (signalPrice * 1.01).toFixed(2)
         : (signalPrice * 0.99).toFixed(2);
       orderBody.limit_price = limitPrice;
-      orderBody.extended_hours = true;
     }
 
     // For crypto: use notional (dollar amount) — Alpaca calculates the exact qty
     if (isCrypto) {
       orderBody.notional = tradeValue.toFixed(2);
     } else {
-      // Alpaca: fractional orders must be "simple" (no bracket/oto).
-      // Round down to whole shares so we can use bracket orders with SL/TP.
+      // Alpaca: fractional/notional orders are REGULAR-HOURS ONLY (no extended_hours,
+      // no overnight). Whole-share limit orders CAN trade extended/overnight, so only
+      // set extended_hours when we're sending whole shares.
       const wholeQty = Math.floor(params.quantity);
       if (wholeQty < 1) {
         orderBody.notional = tradeValue.toFixed(2);
       } else {
         orderBody.qty = wholeQty.toString();
+        orderBody.extended_hours = true;
       }
     }
 

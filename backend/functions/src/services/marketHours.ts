@@ -21,3 +21,17 @@ export function isUsStockMarketOpen(now: Date = new Date()): boolean {
   if (day === 5) return mins < 1200; // Friday — closes 20:00 ET (no Fri→Sat overnight)
   return true; // Mon–Thu — tradeable 24h
 }
+
+/**
+ * True only during the regular US equities session (Mon–Fri 09:30–16:00 ET).
+ * Outside this (pre/post-market + the 24/5 overnight session) Alpaca only accepts
+ * WHOLE-share limit orders with extended_hours — fractional/notional is
+ * regular-hours-only. Used to size the stock monitor's tranches per session.
+ */
+export function isRegularUsStockMarketHours(now: Date = new Date()): boolean {
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = et.getHours() * 60 + et.getMinutes();
+  return mins >= 570 && mins < 960; // 09:30 (570) .. 16:00 (960)
+}

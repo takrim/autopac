@@ -127,7 +127,8 @@ export async function handleTradeApproval(req: Request, res: Response): Promise<
  */
 export async function executeOrder(
   signal: Signal,
-  userId: string
+  userId: string,
+  opts?: { tradeValueUsd?: number }
 ): Promise<{ orderId?: string; status: string }> {
   // Run risk checks
   const riskResult = await runRiskChecks(signal);
@@ -190,7 +191,9 @@ export async function executeOrder(
   const resolvedBroker = (signal.broker as "alpaca" | "coinbase") || tradingConfig.ACTIVE_BROKER;
   const broker = getBroker(resolvedBroker);
   const brokerSettings = getBrokerSettings(tradingConfig, resolvedBroker);
-  const tradeValueUsd = brokerSettings.tradeValueUsd;
+  // Callers (e.g. the stock monitor's session-aware sizing) may override the
+  // per-order dollar size; default to the broker's configured tradeValueUsd.
+  const tradeValueUsd = opts?.tradeValueUsd ?? brokerSettings.tradeValueUsd;
   const quantity = tradeValueUsd / signal.price;
 
   const order: Order = {

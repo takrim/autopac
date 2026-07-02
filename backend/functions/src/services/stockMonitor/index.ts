@@ -23,7 +23,7 @@ import { getTradingConfig, TradingConfig } from "../../api/config";
 import { executeOrder } from "../../api/trade";
 import { logDecision } from "../decisionLog";
 import { Signal } from "../../types";
-import { isUsStockMarketOpen } from "../marketHours";
+import { isUsStockMarketOpen, isRegularUsStockMarketHours } from "../marketHours";
 import { resolveStockWatchlist } from "./watchlist";
 import { fetchStockSnapshots, fetchDailyBars, fetchAlpacaNews, buildMarketRow, StockSnapshot } from "./data";
 import { scoreCoin, ScoreResult, NewsHeadline } from "../cryptoMonitor/scoring";
@@ -380,12 +380,30 @@ async function dcaDip(symbol: string, cur: number, pct: number, cfg: TradingConf
 }
 
 /**
- * Place a stock buy for the monitor. Gating is the DCA stack cap
- * (STOCK_MONITOR_STACK_MAX_USD) + executeOrder's risk checks. Each tranche is
- * sized from brokerSettings.alpaca.tradeValueUsd. No stop-loss (DCA + take-profit).
+ * Place a stock buy for the monitor, sized by session:
+ *   • Regular hours (9:30–4 ET): $10 fractional (brokerSettings.alpaca.tradeValueUsd).
+ *   • Off-hours (extended/overnight): ONE whole share, but only when its price is
+ *     under STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD (fractional can't trade off-hours;
+ *     a pricier whole share would be too large a tranche) — otherwise skip.
+ * Gated by the DCA stack cap (STOCK_MONITOR_STACK_MAX_USD) + executeOrder risk
+ * checks. No stop-loss (exits are take-profit + DCA-into-dips).
  */
 async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, notify: boolean, cfg: TradingConfig, execute = false, tag = "Stock monitor BUY"): Promise<void> {
-  const tradeValueUsd = cfg.brokerSettings?.alpaca?.tradeValueUsd || cfg.TRADE_VALUE_USD;
+  const fractionalUsd = cfg.brokerSettings?.alpaca?.tradeValueUsd || cfg.TRADE_VALUE_USD;
+  const regularHours = isRegularUsStockMarketHours();
+
+  // Session-aware tranche size. Off-hours must be a whole share (fractional is
+  // regular-hours-only on Alpaca), and only if 1 share fits the price ceiling.
+  let tradeValueUsd: number;
+  if (regularHours) {
+    tradeValueUsd = fractionalUsd;
+  } else {
+    if (!(price > 0) || price >= cfg.STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD) {
+      logger.info("[STOCK_MONITOR] off-hours buy skipped — 1 whole share not under ceiling", { symbol: coin.symbol, price, ceiling: cfg.STOCK_MONITOR_OVERNIGHT_MAX_SHARE_USD });
+      return;
+    }
+    tradeValueUsd = price; // → quantity ≈ 1 → one whole share (extended/overnight eligible)
+  }
 
   try {
     const positions = await (getBroker("alpaca") as AlpacaBroker).getDetailedPositions();
@@ -433,7 +451,7 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
   });
 
   if (execute) {
-    const res = await executeOrder(buySignal, "stock-monitor");
+    const res = await executeOrder(buySignal, "stock-monitor", { tradeValueUsd });
     if (notify) {
       await tgMuted(
         res.status === "executed"
