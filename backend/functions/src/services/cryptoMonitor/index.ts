@@ -29,7 +29,7 @@ import { scoreCoin, MarketRow, ScoreResult } from "./scoring";
 import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "./format";
 import {
   evaluateAll, selectAlert, StrategyResult, StrategyConfig, STRATEGY_DEFAULTS, STRATEGY_PRIORITY, AlertType,
-  shouldStack, gainPct,
+  shouldStack, gainPct, shouldDcaDip,
 } from "./strategies";
 
 const db = getFirestore();
@@ -166,7 +166,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   // Position sweep (take-profit + DCA-on-dip) over ALL held Coinbase positions
   // (full scheduled runs only).
   if (!dryRun && !opts?.onlySymbol && tradingConfig.MONITOR_AUTO_BUY) {
-    await runPositionSweep(tradingConfig, strategyCfg.cooldown_hours, notify).catch(async err => {
+    await runPositionSweep(tradingConfig, strategyCfg, notify).catch(async err => {
       logger.error("[CRYPTO_MONITOR] position sweep failed", { error: String(err) });
       if (notify) await tgMuted(`🚨 *Position sweep FAILED*\n${String(err).slice(0, 200)}`).catch(() => {});
     });
@@ -368,12 +368,11 @@ async function scoreHeldCoin(symbol: string): Promise<{ coin: WatchCoin; result:
  * Sweep over every held Coinbase position once per scheduled run:
  *   • take-profit  — sell when ≥ MONITOR_TAKE_PROFIT_PCT above average entry;
  *   • DCA-on-dip   — buy another tranche when ≤ MONITOR_DCA_DIP_PCT below average
- *                    entry, guarded by the $100 stack cap (in autoBuy), a
- *                    re-scored major-bearish-news check, and a per-coin cooldown.
- * Measured vs average entry, so each dip-buy lowers the average and the next
- * trigger requires a further drop — the rule is naturally self-spacing.
+ *                    entry, guarded by the $100 stack cap (in autoBuy) and the
+ *                    shouldDcaDip rules (trend intact, technical floor, no major
+ *                    bearish news, price ladder vs the last tranche, 4h cooldown).
  */
-async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notify: boolean): Promise<void> {
+async function runPositionSweep(cfg: TradingConfig, strategyCfg: StrategyConfig, notify: boolean): Promise<void> {
   const broker = getBroker("coinbase") as CoinbaseBroker;
   const positions = await broker.getDetailedPositions();
   for (const p of positions) {
@@ -411,37 +410,50 @@ async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notif
 
     // DCA-on-dip: buy more when far enough BELOW average entry.
     if (cfg.MONITOR_DCA_DIP_PCT > 0 && pct <= -cfg.MONITOR_DCA_DIP_PCT) {
-      await dcaDip(symbol, cur, avg, pct, cfg, cooldownHours, notify).catch(async err => {
+      await dcaDip(symbol, cur, pct, cfg, strategyCfg.dca_dip, notify).catch(err => {
         logger.error("[CRYPTO_MONITOR] DCA dip-buy failed", { symbol, error: String(err) });
-        if (notify) await tgMuted(`🚨 *DCA dip-buy FAILED* ${symbol}\n${String(err).slice(0, 200)}`).catch(() => {});
       });
     }
   }
 }
 
 /** DCA another tranche into a held coin that has dropped ≥ MONITOR_DCA_DIP_PCT
- * below average entry. Skips a major-bearish catalyst (don't average into a
- * hack/lawsuit/etc.); the $100 stack cap is enforced inside autoBuy. A per-coin
- * cooldown keeps a sustained drop from buying on every 5-min run. */
-async function dcaDip(symbol: string, cur: number, avg: number, pct: number, cfg: TradingConfig, cooldownHours: number, notify: boolean): Promise<void> {
+ * below average entry. Gated by shouldDcaDip (trend intact, technical floor, no
+ * major-bearish news, ≥min_drop_step_pct below the LAST tranche) plus a dedicated
+ * dip cooldown, so a sustained reversal stops the ladder instead of filling the
+ * stack cap (which autoBuy still enforces) on the way down. */
+async function dcaDip(symbol: string, cur: number, pct: number, cfg: TradingConfig, dipCfg: StrategyConfig["dca_dip"], notify: boolean): Promise<void> {
   const stateRef = db.collection("monitor_state").doc(`${symbol.toUpperCase()}__DCA_DIP`);
   const now = Date.now();
-  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number } | undefined;
-  if (prev?.lastAlertAtMs && now - prev.lastAlertAtMs < cooldownHours * 60 * 60 * 1000) return;
+  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number; lastBuyPrice?: number } | undefined;
+  if (prev?.lastAlertAtMs && now - prev.lastAlertAtMs < dipCfg.cooldown_hours * 60 * 60 * 1000) return;
 
   const scored = await scoreHeldCoin(symbol);
   if (!scored) {
     logger.warn("[CRYPTO_MONITOR] DCA dip skipped — could not score", { symbol });
     return;
   }
-  if (scored.result.majorBearish) {
-    logger.info("[CRYPTO_MONITOR] DCA dip skipped — major bearish news", { symbol, pct: pct.toFixed(2) });
-    if (notify) await tgMuted(`⏸ *DCA dip skipped* ${symbol} ${pct.toFixed(1)}% — major bearish news, not averaging down`).catch(() => {});
+
+  const verdict = shouldDcaDip(
+    {
+      pct,
+      currentPrice: cur,
+      lastDipBuyPrice: prev?.lastBuyPrice ?? null,
+      priceAboveEma200: scored.result.priceAboveEma200,
+      technical: scored.result.technical,
+      majorBearish: scored.result.majorBearish,
+    },
+    dipCfg,
+    cfg.MONITOR_DCA_DIP_PCT,
+  );
+  if (!verdict.buy) {
+    logger.info("[CRYPTO_MONITOR] DCA dip skipped", { symbol, pct: pct.toFixed(2), reason: verdict.reason });
     return;
   }
 
-  // Claim the cooldown before buying so a retry/double-tick can't double-buy.
-  await stateRef.set({ lastAlertAtMs: now, lastAlertType: "DCA_DIP" }, { merge: true });
+  // Claim the cooldown + record this tranche's price (the ladder reference)
+  // BEFORE buying so a retry/double-tick can't double-buy.
+  await stateRef.set({ lastAlertAtMs: now, lastAlertType: "DCA_DIP", lastBuyPrice: cur }, { merge: true });
   await autoBuy(scored.coin, scored.result, cur, notify, cfg, true, `DCA dip buy ${pct.toFixed(1)}% below entry`);
 }
 

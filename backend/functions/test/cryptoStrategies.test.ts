@@ -2,7 +2,7 @@ import { ScoreResult } from "../src/services/cryptoMonitor/scoring";
 import {
   evaluateFundamentalWatch, evaluateAccumulationSetup, evaluateBuySetup, evaluateStrongBuy,
   evaluateMomentumBreakout, evaluatePullbackBuyZone, evaluateRiskBlock, evaluateAll, selectAlert,
-  shouldStack, gainPct,
+  shouldStack, gainPct, shouldDcaDip, DipContext, STRATEGY_DEFAULTS,
 } from "../src/services/cryptoMonitor/strategies";
 
 /** Minimal scorecard factory — only the fields strategies read need to be set. */
@@ -102,5 +102,44 @@ describe("selectAlert (priority + suppression)", () => {
     const sc = mk({ fundamental: 3, technical: 0 });
     const { selected } = selectAlert(evaluateAll(sc));
     expect(selected?.name).toBe("FUNDAMENTAL_WATCH");
+  });
+});
+
+describe("shouldDcaDip (averaging-down guards)", () => {
+  const cfg = STRATEGY_DEFAULTS.dca_dip; // 4h cooldown, 5% ladder, T>=5, above EMA200
+  const base: DipContext = {
+    pct: -12, currentPrice: 0.55, lastDipBuyPrice: null,
+    priceAboveEma200: true, technical: 8, majorBearish: false,
+  };
+
+  test("happy path: deep enough, trend intact, first tranche", () => {
+    expect(shouldDcaDip(base, cfg, 10).buy).toBe(true);
+  });
+
+  test("not deep enough vs trigger", () => {
+    expect(shouldDcaDip({ ...base, pct: -6 }, cfg, 10).buy).toBe(false);
+  });
+
+  test("disabled trigger (0) never buys", () => {
+    expect(shouldDcaDip(base, cfg, 0).buy).toBe(false);
+  });
+
+  test("major bearish news blocks", () => {
+    expect(shouldDcaDip({ ...base, majorBearish: true }, cfg, 10).buy).toBe(false);
+  });
+
+  test("trend broken (below EMA200) blocks; allowed when not required", () => {
+    expect(shouldDcaDip({ ...base, priceAboveEma200: false }, cfg, 10).buy).toBe(false);
+    expect(shouldDcaDip({ ...base, priceAboveEma200: false }, { ...cfg, require_above_ema200: false }, 10).buy).toBe(true);
+  });
+
+  test("technical below floor blocks", () => {
+    expect(shouldDcaDip({ ...base, technical: 3 }, cfg, 10).buy).toBe(false);
+  });
+
+  test("ladder: needs >=5% below the LAST tranche", () => {
+    // last buy 0.566: -3% (0.549) blocked, -5% (0.5377) allowed — the WLD case.
+    expect(shouldDcaDip({ ...base, lastDipBuyPrice: 0.566, currentPrice: 0.549 }, cfg, 10).buy).toBe(false);
+    expect(shouldDcaDip({ ...base, lastDipBuyPrice: 0.566, currentPrice: 0.5377 }, cfg, 10).buy).toBe(true);
   });
 });

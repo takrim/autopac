@@ -31,7 +31,7 @@ import { WatchCoin } from "../cryptoMonitor/watchlist";
 import { formatBreakdown, formatBeginnerBreakdown, toPlainText } from "../cryptoMonitor/format";
 import {
   evaluateAll, selectAlert, StrategyResult, StrategyConfig, STRATEGY_DEFAULTS, STRATEGY_PRIORITY, AlertType,
-  shouldStack, gainPct,
+  shouldStack, gainPct, shouldDcaDip,
 } from "../cryptoMonitor/strategies";
 
 const db = getFirestore();
@@ -134,7 +134,7 @@ export async function runStockMonitor(opts?: { onlySymbol?: string; notify?: boo
 
   // Position sweep (take-profit + DCA-on-dip) over held Alpaca equities.
   if (!dryRun && !opts?.onlySymbol && tradingConfig.STOCK_MONITOR_AUTO_BUY) {
-    await runPositionSweep(tradingConfig, strategyCfg.cooldown_hours, notify).catch(async err => {
+    await runPositionSweep(tradingConfig, strategyCfg, notify).catch(async err => {
       logger.error("[STOCK_MONITOR] position sweep failed", { error: String(err) });
       if (notify) await tgMuted(`🚨 *Stock position sweep FAILED*\n${String(err).slice(0, 200)}`).catch(() => {});
     });
@@ -300,10 +300,12 @@ async function scoreHeldStock(symbol: string): Promise<{ coin: WatchCoin; result
 
 /**
  * Sweep held Alpaca equities once per run: take-profit ≥ STOCK_MONITOR_TAKE_PROFIT_PCT
- * above avg entry; DCA-on-dip ≤ STOCK_MONITOR_DCA_DIP_PCT below avg entry (stack-cap
- * + major-bearish + per-coin cooldown guarded). Crypto positions are ignored.
+ * above avg entry; DCA-on-dip ≤ STOCK_MONITOR_DCA_DIP_PCT below avg entry, gated by
+ * the shouldDcaDip rules (trend intact, technical floor, no major bearish news,
+ * price ladder vs the last tranche, dedicated cooldown) + the stack cap in autoBuy.
+ * Crypto positions are ignored.
  */
-async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notify: boolean): Promise<void> {
+async function runPositionSweep(cfg: TradingConfig, strategyCfg: StrategyConfig, notify: boolean): Promise<void> {
   const broker = getBroker("alpaca") as AlpacaBroker;
   const positions = await broker.getDetailedPositions();
   for (const p of positions) {
@@ -336,30 +338,44 @@ async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notif
     }
 
     if (cfg.STOCK_MONITOR_DCA_DIP_PCT > 0 && pct <= -cfg.STOCK_MONITOR_DCA_DIP_PCT) {
-      await dcaDip(symbol, cur, avg, pct, cfg, cooldownHours, notify).catch(async err => {
+      await dcaDip(symbol, cur, pct, cfg, strategyCfg.dca_dip, notify).catch(err => {
         logger.error("[STOCK_MONITOR] DCA dip-buy failed", { symbol, error: String(err) });
-        if (notify) await tgMuted(`🚨 *Stock DCA dip-buy FAILED* ${symbol}\n${String(err).slice(0, 200)}`).catch(() => {});
       });
     }
   }
 }
 
-/** DCA another tranche into a held stock that has dropped enough below avg entry. */
-async function dcaDip(symbol: string, cur: number, avg: number, pct: number, cfg: TradingConfig, cooldownHours: number, notify: boolean): Promise<void> {
+/** DCA another tranche into a held stock that has dropped enough below avg entry.
+ * Gated by shouldDcaDip (trend intact, technical floor, no major-bearish news,
+ * ≥min_drop_step_pct below the LAST tranche) plus a dedicated dip cooldown. */
+async function dcaDip(symbol: string, cur: number, pct: number, cfg: TradingConfig, dipCfg: StrategyConfig["dca_dip"], notify: boolean): Promise<void> {
   const stateRef = db.collection("stock_monitor_state").doc(`${symbol.toUpperCase()}__DCA_DIP`);
   const now = Date.now();
-  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number } | undefined;
-  if (prev?.lastAlertAtMs && now - prev.lastAlertAtMs < cooldownHours * 60 * 60 * 1000) return;
+  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number; lastBuyPrice?: number } | undefined;
+  if (prev?.lastAlertAtMs && now - prev.lastAlertAtMs < dipCfg.cooldown_hours * 60 * 60 * 1000) return;
 
   const scored = await scoreHeldStock(symbol);
   if (!scored) { logger.warn("[STOCK_MONITOR] DCA dip skipped — could not score", { symbol }); return; }
-  if (scored.result.majorBearish) {
-    logger.info("[STOCK_MONITOR] DCA dip skipped — major bearish news", { symbol, pct: pct.toFixed(2) });
-    if (notify) await tgMuted(`⏸ *Stock DCA dip skipped* ${symbol} ${pct.toFixed(1)}% — major bearish news, not averaging down`).catch(() => {});
+
+  const verdict = shouldDcaDip(
+    {
+      pct,
+      currentPrice: cur,
+      lastDipBuyPrice: prev?.lastBuyPrice ?? null,
+      priceAboveEma200: scored.result.priceAboveEma200,
+      technical: scored.result.technical,
+      majorBearish: scored.result.majorBearish,
+    },
+    dipCfg,
+    cfg.STOCK_MONITOR_DCA_DIP_PCT,
+  );
+  if (!verdict.buy) {
+    logger.info("[STOCK_MONITOR] DCA dip skipped", { symbol, pct: pct.toFixed(2), reason: verdict.reason });
     return;
   }
 
-  await stateRef.set({ lastAlertAtMs: now, lastAlertType: "DCA_DIP" }, { merge: true });
+  // Claim the cooldown + ladder reference BEFORE buying (double-tick protection).
+  await stateRef.set({ lastAlertAtMs: now, lastAlertType: "DCA_DIP", lastBuyPrice: cur }, { merge: true });
   await autoBuy(scored.coin, scored.result, cur, notify, cfg, true, `DCA dip buy ${pct.toFixed(1)}% below entry`);
 }
 

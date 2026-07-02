@@ -40,6 +40,13 @@ export interface StrategyConfig {
   momentum_breakout: { min_f: number; min_volume_multiplier: number; min_rsi: number; max_rsi: number; max_24h_change: number };
   pullback_buy_zone: { min_f: number; min_rsi: number; max_rsi: number };
   cooldown_hours: number;
+  /** Guards for averaging down into a held position (see shouldDcaDip). */
+  dca_dip: {
+    cooldown_hours: number; // dedicated dip cooldown (NOT the alert cooldown)
+    min_drop_step_pct: number; // next tranche only this % below the LAST dip-buy price
+    min_technical: number; // skip once the technical score has collapsed (trend broken)
+    require_above_ema200: boolean; // only average down while price holds above EMA200
+  };
 }
 
 /** Default thresholds (STRONG_BUY uses the temporary MVP gate while fundamentals are partial). */
@@ -53,6 +60,15 @@ export const STRATEGY_DEFAULTS: StrategyConfig = {
   // Per coin+strategy throttle. 0.5h (30 min) lets DCA stacking add $10 every few
   // 5-min runs (≈2.5h to reach the $100/coin cap) without spamming every run.
   cooldown_hours: 0.5,
+  // Averaging-down guards (WLD post-mortem: 7 tranches in ~2.5 days into a trend
+  // reversal). Dip buys are throttled separately, laddered by price, and only
+  // allowed while the trend is still intact.
+  dca_dip: {
+    cooldown_hours: 4,
+    min_drop_step_pct: 5,
+    min_technical: 5,
+    require_above_ema200: true,
+  },
 };
 
 // Helpers — null RSI fails any RSI bound (conservative).
@@ -165,6 +181,41 @@ export function shouldStack(costBasisUsd: number, tradeValueUsd: number, maxStac
 export function gainPct(avgEntry: number, current: number): number | null {
   if (!(avgEntry > 0) || !(current > 0)) return null;
   return ((current - avgEntry) / avgEntry) * 100;
+}
+
+/** Everything shouldDcaDip needs to judge one potential averaging-down buy. */
+export interface DipContext {
+  pct: number; // gain % vs avg entry (negative = underwater)
+  currentPrice: number;
+  lastDipBuyPrice: number | null; // from the __DCA_DIP state doc; null = first dip buy
+  priceAboveEma200: boolean;
+  technical: number;
+  majorBearish: boolean;
+}
+
+/**
+ * Decide whether to average down into a held position (pure — unit-testable).
+ * A "dip" is only bought while the trend is still intact and each tranche lands
+ * meaningfully below the previous one, so a sustained reversal (falling knife)
+ * stops the ladder instead of filling the stack cap on the way down.
+ */
+export function shouldDcaDip(
+  ctx: DipContext,
+  cfg: StrategyConfig["dca_dip"],
+  dipTriggerPct: number,
+): { buy: boolean; reason: string } {
+  if (!(dipTriggerPct > 0)) return { buy: false, reason: "dip buying disabled (trigger ≤ 0)" };
+  if (ctx.pct > -dipTriggerPct) return { buy: false, reason: `only ${ctx.pct.toFixed(1)}% below entry (needs ≤ -${dipTriggerPct}%)` };
+  if (ctx.majorBearish) return { buy: false, reason: "major bearish news — not averaging down" };
+  if (cfg.require_above_ema200 && !ctx.priceAboveEma200) return { buy: false, reason: "trend broken (price below EMA200)" };
+  if (ctx.technical < cfg.min_technical) return { buy: false, reason: `technical ${ctx.technical} < floor ${cfg.min_technical} (trend broken)` };
+  if (ctx.lastDipBuyPrice != null && ctx.lastDipBuyPrice > 0) {
+    const needed = ctx.lastDipBuyPrice * (1 - cfg.min_drop_step_pct / 100);
+    if (ctx.currentPrice > needed) {
+      return { buy: false, reason: `only ${(((ctx.lastDipBuyPrice - ctx.currentPrice) / ctx.lastDipBuyPrice) * 100).toFixed(1)}% below last tranche (ladder needs ${cfg.min_drop_step_pct}%)` };
+    }
+  }
+  return { buy: true, reason: `${ctx.pct.toFixed(1)}% below entry, trend intact, ladder spacing met` };
 }
 
 const priorityOf = (a: AlertType) => STRATEGY_PRIORITY.indexOf(a);
