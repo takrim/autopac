@@ -35,6 +35,36 @@ import {
 const db = getFirestore();
 const METRICS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
+// Telegram is muted for the monitor (user request). Every proactive
+// sendTelegramMessage call in this file was aliased to this no-op. The ONLY
+// Telegram message we still send is the "DCA maxed out & still underwater"
+// review alert — see alertStuckUnderwater(), which calls sendTelegramMessage
+// directly. Mobile push (sendCryptoBuy*/sendTakeProfit*) is unaffected.
+const tgMuted = async (_msg?: string): Promise<void> => {};
+
+/** Throttle (per coin) for the "stuck at cap & underwater" Telegram review alert. */
+const STUCK_ALERT_THROTTLE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Send the coin's analysis to Telegram when its DCA is "continuously failing" —
+ * i.e. we've hit MONITOR_STACK_MAX_USD (can't stack more) but it's still below
+ * average entry (underwater). Throttled per coin so it's a periodic review nudge,
+ * not spam. This is the sole proactive Telegram message the monitor still sends.
+ */
+async function alertStuckUnderwater(coin: WatchCoin, result: ScoreResult, price: number, avg: number, cur: number, pct: number, capUsd: number, costBasis: number): Promise<void> {
+  const stateRef = db.collection("monitor_state").doc(`${coin.symbol.toUpperCase()}__CAP_UNDERWATER`);
+  const now = Date.now();
+  const prev = (await stateRef.get()).data() as { lastAlertAtMs?: number } | undefined;
+  if (prev?.lastAlertAtMs && now - prev.lastAlertAtMs < STUCK_ALERT_THROTTLE_MS) return;
+  await stateRef.set({ lastAlertAtMs: now }, { merge: true });
+
+  const header =
+    `🔴 *DCA maxed out & still underwater* — ${coin.symbol}\n` +
+    `Invested ~$${costBasis.toFixed(0)} (cap $${capUsd}) · avg entry ${avg} · now ${cur} · *${pct.toFixed(1)}%*\n` +
+    `Can't average down further. Review whether to hold or cut:\n\n`;
+  await sendTelegramMessage(header + formatBeginnerBreakdown(coin, result, price)).catch(() => {});
+}
+
 /** Merge an optional Firestore override (monitor_config/strategies) over the defaults. */
 async function loadStrategyConfig(): Promise<StrategyConfig> {
   try {
@@ -138,7 +168,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
   if (!dryRun && !opts?.onlySymbol && tradingConfig.MONITOR_AUTO_BUY) {
     await runPositionSweep(tradingConfig, strategyCfg.cooldown_hours, notify).catch(async err => {
       logger.error("[CRYPTO_MONITOR] position sweep failed", { error: String(err) });
-      if (notify) await sendTelegramMessage(`🚨 *Position sweep FAILED*\n${String(err).slice(0, 200)}`).catch(() => {});
+      if (notify) await tgMuted(`🚨 *Position sweep FAILED*\n${String(err).slice(0, 200)}`).catch(() => {});
     });
   }
 
@@ -219,7 +249,7 @@ export async function runCryptoMonitor(opts?: { onlySymbol?: string; notify?: bo
         await autoBuy(coin, result, price, notify, tradingConfig, true, "Auto-buy STRONG_BUY").catch(async err => {
           logger.error("[CRYPTO_MONITOR] auto-buy failed", { symbol: coin.symbol, error: String(err) });
           if (notify) {
-            await sendTelegramMessage(`🚨 *Auto-buy FAILED* ${coin.symbol} (STRONG_BUY)\n${String(err).slice(0, 200)}`).catch(() => {});
+            await tgMuted(`🚨 *Auto-buy FAILED* ${coin.symbol} (STRONG_BUY)\n${String(err).slice(0, 200)}`).catch(() => {});
             await sendCryptoBuyFailedNotification(coin.symbol, String(err)).catch(() => {});
           }
         });
@@ -310,7 +340,7 @@ async function notifyAlert(
   }
 
   if (notify) {
-    await sendTelegramMessage(formatBeginnerBreakdown(coin, result, price)).catch(() => {});
+    await tgMuted(formatBeginnerBreakdown(coin, result, price)).catch(() => {});
     // Mobile push is reserved for STRONG_BUY only (other alert types stay
     // Telegram-only). Buy-failure and take-profit-sell pushes fire elsewhere.
     if (selected.name === "STRONG_BUY") {
@@ -369,12 +399,12 @@ async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notif
           params: { result },
         });
         if (notify) {
-          await sendTelegramMessage(`💰 *Take-profit SOLD* ${symbol} +${pct.toFixed(2)}% (entry ${avg}, now ${cur})`).catch(() => {});
+          await tgMuted(`💰 *Take-profit SOLD* ${symbol} +${pct.toFixed(2)}% (entry ${avg}, now ${cur})`).catch(() => {});
           await sendTakeProfitSoldNotification(symbol, pct, avg, cur).catch(() => {});
         }
       } catch (err) {
         logger.error("[CRYPTO_MONITOR] take-profit sell failed", { symbol, error: String(err) });
-        if (notify) await sendTelegramMessage(`❌ *Take-profit sell failed* ${symbol}: ${String(err).slice(0, 150)}`).catch(() => {});
+        if (notify) await tgMuted(`❌ *Take-profit sell failed* ${symbol}: ${String(err).slice(0, 150)}`).catch(() => {});
       }
       continue;
     }
@@ -383,7 +413,7 @@ async function runPositionSweep(cfg: TradingConfig, cooldownHours: number, notif
     if (cfg.MONITOR_DCA_DIP_PCT > 0 && pct <= -cfg.MONITOR_DCA_DIP_PCT) {
       await dcaDip(symbol, cur, avg, pct, cfg, cooldownHours, notify).catch(async err => {
         logger.error("[CRYPTO_MONITOR] DCA dip-buy failed", { symbol, error: String(err) });
-        if (notify) await sendTelegramMessage(`🚨 *DCA dip-buy FAILED* ${symbol}\n${String(err).slice(0, 200)}`).catch(() => {});
+        if (notify) await tgMuted(`🚨 *DCA dip-buy FAILED* ${symbol}\n${String(err).slice(0, 200)}`).catch(() => {});
       });
     }
   }
@@ -406,7 +436,7 @@ async function dcaDip(symbol: string, cur: number, avg: number, pct: number, cfg
   }
   if (scored.result.majorBearish) {
     logger.info("[CRYPTO_MONITOR] DCA dip skipped — major bearish news", { symbol, pct: pct.toFixed(2) });
-    if (notify) await sendTelegramMessage(`⏸ *DCA dip skipped* ${symbol} ${pct.toFixed(1)}% — major bearish news, not averaging down`).catch(() => {});
+    if (notify) await tgMuted(`⏸ *DCA dip skipped* ${symbol} ${pct.toFixed(1)}% — major bearish news, not averaging down`).catch(() => {});
     return;
   }
 
@@ -433,7 +463,13 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
     const costBasis = pos ? parseFloat(String(pos.cost_basis) || "0") : 0;
     if (!shouldStack(costBasis, tradeValueUsd, cfg.MONITOR_STACK_MAX_USD)) {
       logger.info("[CRYPTO_MONITOR] stack cap reached — skipping", { symbol: coin.symbol, costBasis, max: cfg.MONITOR_STACK_MAX_USD });
-      if (notify) await sendTelegramMessage(`⏸ *${tag} skipped* ${coin.symbol} — already ~$${costBasis.toFixed(0)} invested (max $${cfg.MONITOR_STACK_MAX_USD})`).catch(() => {});
+      // DCA is "continuously failing": at the cap but still underwater → Telegram review.
+      if (notify && pos) {
+        const avg = parseFloat(String(pos.avg_entry_price) || "0");
+        const cur = parseFloat(String(pos.current_price) || "0");
+        const pct = gainPct(avg, cur);
+        if (pct != null && pct < 0) await alertStuckUnderwater(coin, result, price, avg, cur, pct, cfg.MONITOR_STACK_MAX_USD, costBasis).catch(() => {});
+      }
       return;
     }
   } catch (err) {
@@ -478,14 +514,14 @@ async function autoBuy(coin: WatchCoin, result: ScoreResult, price: number, noti
   if (execute) {
     const res = await executeOrder(buySignal, "crypto-monitor");
     if (notify) {
-      await sendTelegramMessage(
+      await tgMuted(
         res.status === "executed"
           ? `✅ *${tag}* ${coin.symbol} @ ${entryPrice} (score ${result.total})`
           : `❌ *${tag} not executed* ${coin.symbol}\nexecuteOrder: ${res.status}`
       ).catch(() => {});
     }
   } else if (notify) {
-    await sendTelegramMessage(`⏸ *${tag} stored* ${coin.symbol} @ ${entryPrice}\nmanual approval required`).catch(() => {});
+    await tgMuted(`⏸ *${tag} stored* ${coin.symbol} @ ${entryPrice}\nmanual approval required`).catch(() => {});
   }
 }
 

@@ -39,7 +39,6 @@ import { handleGetTrending } from "./api/trending";
 import { handleListCryptoAlerts, handleGetLastRun } from "./api/crypto";
 import { handleGetStockLastRun, handleListStockAlerts } from "./api/stocks";
 import { handleTelegramWebhook } from "./webhooks/telegram";
-import { sendTelegramMessage } from "./services/telegram";
 import { runCryptoMonitor } from "./services/cryptoMonitor";
 import { runStockMonitor } from "./services/stockMonitor";
 
@@ -154,7 +153,7 @@ export const cryptoMonitor = onSchedule(
     } catch (err) {
       const msg = String(err);
       logger.error("[CRYPTO_MONITOR] Scheduled run failed", { error: msg });
-      await sendTelegramMessage(`⚠️ Crypto Monitor FAILED:\n${msg}`).catch(() => {});
+      // Telegram muted per user request — failures go to logs only.
     }
   }
 );
@@ -176,7 +175,7 @@ export const stockMonitor = onSchedule(
     } catch (err) {
       const msg = String(err);
       logger.error("[STOCK_MONITOR] Scheduled run failed", { error: msg });
-      await sendTelegramMessage(`⚠️ Stock Monitor FAILED:\n${msg}`).catch(() => {});
+      // Telegram muted per user request — failures go to logs only.
     }
   }
 );
